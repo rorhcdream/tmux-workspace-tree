@@ -34,7 +34,10 @@ plain window switcher.
   cwd (windows)
 - the icon is `🤖`/`💬`/`✅`; a row with no agent icon is left blank (no placeholder
   dot). (The status bar's recency `•` marker is stripped here, since the list is
-  already recency-sorted.)
+  already recency-sorted.) The icons and status timestamps come from
+  [tmux-agent-status](https://github.com/rorhcdream/tmux-agent-status) — install it
+  alongside this plugin to get the per-agent grouping and icons; without it, rows
+  simply show no icon and tasks sort by window activity.
 - **on open** the cursor starts on the row for the window you were in
 
 ## Requirements
