@@ -22,9 +22,14 @@ ROOT="$(tmux show-option -gqv @workspace_tree_root)"; ROOT="${ROOT:-$HOME/work}"
 WORK_WIN="$(tmux show-option -gqv @workspace_tree_work_window)"; WORK_WIN="${WORK_WIN:-0}"
 TASKS="$ROOT/tasks"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-STATE="${TMPDIR:-/tmp}/wstree.sort"
-SHOWALL="${TMPDIR:-/tmp}/wstree.showall"
-LABELS="${TMPDIR:-/tmp}/wstree.labels"   # jump label -> row position map (see label())
+# Per-user state dir (0700) instead of predictable /tmp/wstree.* names, which on
+# a shared host another user could pre-create or symlink-clobber.
+WSDIR="${TMPDIR:-/tmp}/wstree-$(id -u)"
+mkdir -p "$WSDIR" 2>/dev/null || true
+chmod 700 "$WSDIR" 2>/dev/null || true
+STATE="$WSDIR/sort"
+SHOWALL="$WSDIR/showall"
+LABELS="$WSDIR/labels"   # jump label -> row position map (see label())
 HIDE_DAYS="$(tmux show-option -gqv @workspace_tree_hide_days)"; HIDE_DAYS="${HIDE_DAYS:-14}"
 # tmux-agent-status appends this recency marker to some icons ("✅ •"), making
 # those cells wider than bare ones. We keep it but reserve a fixed slot (below).
