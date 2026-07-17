@@ -24,13 +24,13 @@ plain window switcher.
   Claude session) is pinned first, then all other non-task windows (ordered by tmux window
   index — stable, so a busy `.claude` window no longer reshuffles), then tasks. Tasks are
   sub-grouped **finished → waiting → running**, each ordered by the status timestamp
-  (`@claude_status_ts`: finish time for done, trigger time for running). That timestamp is
+  (`@agent_status_ts`: finish time for done, trigger time for running). That timestamp is
   stable, so running tasks don't reshuffle the way a `window_activity` sort would.
   (`name`/`dirty` sort modes ignore the sub-grouping.) A dim `───` separator row
   divides the window group from the task group (shown only when both exist; it's a
   no-op if selected).
 - each row shows, left to right: the jump label, the original tmux **window number**
-  (dim), the `@claude_status` icon, the name, and the repos (tasks) or `~`-abbreviated
+  (dim), the `@agent_status` icon, the name, and the repos (tasks) or `~`-abbreviated
   cwd (windows)
 - the icon is `🤖`/`💬`/`✅`; a faint `·` marks a row with no agent icon — lighter for a
   live window, dimmer for a stale (no-window) task dir. (The status bar's recency `•`

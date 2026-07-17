@@ -28,11 +28,11 @@ LABELS="${TMPDIR:-/tmp}/wstree.labels"   # jump label -> row position map (see l
 HIDE_DAYS="$(tmux show-option -gqv @workspace_tree_hide_days)"; HIDE_DAYS="${HIDE_DAYS:-14}"
 # tmux-claude-status appends this recency marker to some icons ("✅ •"), making
 # those cells wider than bare ones. We keep it but reserve a fixed slot (below).
-MARK="$(tmux show-option -gqv @claude_status_recent_marker)"; MARK="${MARK:-•}"
+MARK="$(tmux show-option -gqv @agent_status_recent_marker)"; MARK="${MARK:-•}"
 # The status plugin's icons, used to group tasks (finished on top, then running).
-I_DONE="$(tmux show-option -gqv @claude_status_done)"; I_DONE="${I_DONE:-✅}"
-I_WORK="$(tmux show-option -gqv @claude_status_working)"; I_WORK="${I_WORK:-🤖}"
-I_WAIT="$(tmux show-option -gqv @claude_status_waiting)"; I_WAIT="${I_WAIT:-💬}"
+I_DONE="$(tmux show-option -gqv @agent_status_done)"; I_DONE="${I_DONE:-✅}"
+I_WORK="$(tmux show-option -gqv @agent_status_working)"; I_WORK="${I_WORK:-🤖}"
+I_WAIT="$(tmux show-option -gqv @agent_status_waiting)"; I_WAIT="${I_WAIT:-💬}"
 # Blank placeholder for no-agent-icon rows: 2 spaces, matching emoji width so
 # names stay column-aligned whether or not a row has an icon. (Same for live and
 # stale rows — the distinction is no longer drawn with a dot.)
@@ -66,27 +66,39 @@ dirty_count() { # total dirty files across a task's worktrees
 idxcol() { if [ -n "$1" ]; then printf '\033[38;5;240m%2s\033[0m' "$1"; else printf '  '; fi; }
 # ~-abbreviate a home path (bash's ${v/#$HOME/~} is unreliable, so strip the prefix)
 tilde() { case "$1" in "$HOME") printf '~' ;; "$HOME"/*) printf '~%s' "${1#$HOME}" ;; *) printf '%s' "$1" ;; esac; }
+# Fixed-width name cell: pad short names, ellipsis-truncate long ones (…), so the
+# repos/path column always aligns and never collides with a long name. Names are
+# ASCII, so char count == display width. NAME_W is tunable.
+NAME_W=30
+namecol() {
+  if [ "${#1}" -gt "$NAME_W" ]; then printf '%s…' "${1:0:$((NAME_W-1))}"
+  else printf '%-*s' "$NAME_W" "$1"; fi
+}
 
-# emit: <prio>\t<subprio>\t<sortts>\t<dirty-or-0>\t<name>\t<display>
+# emit: <prio>\t<subprio>\t<sortts>\t<dirty-or-0>\t<name>\t<targetid>\t<display>
 # prio groups rows: 0 = workspace-root window (cwd == $ROOT, e.g. the ~/work Claude
 # session), 1 = other non-task windows (on top), 2 = separator line, 3 = tasks.
 # subprio sub-orders tasks (finished, waiting, running, none). sortts is the key
 # list_tasks sorts each group by: for tasks the status timestamp (stable), else
-# window_activity.
+# window_activity. targetid is the tmux @window-id enter/jump switches to — unique
+# even when two windows share a name (name alone is ambiguous).
 # (cwd, not window index: renumber-windows shifts indices, so index 0 is unreliable.)
 rows() {
   local mode="$1" showall ntask=0 nwin=0
   showall="$(cat "$SHOWALL" 2>/dev/null || echo 0)"
-  declare -A ACT STAT CWD IDX TS
-  local -a WNAMES=()
-  # @claude_status / @claude_status_ts are often empty; a bare tab-IFS read would
+  declare -A ACT STAT CWD IDX TS WID
+  local -a WINLINES=()
+  # @agent_status / @agent_status_ts are often empty; a bare tab-IFS read would
   # collapse those empties and shift fields, so emit '-'/'0' sentinels for them.
-  while IFS=$'\t' read -r idx name act cwd stat ts; do
+  # We stash each raw line (sentinels intact) in WINLINES and iterate THAT for the
+  # window rows below — the name-keyed arrays collapse duplicate names (two windows
+  # named "server" would share one entry), but each raw line is distinct.
+  while IFS=$'\t' read -r idx name act cwd stat ts wid; do
+    WINLINES+=("$idx"$'\t'"$name"$'\t'"$act"$'\t'"$cwd"$'\t'"$stat"$'\t'"$ts"$'\t'"$wid")
     [ "$stat" = "-" ] && stat=""
-    IDX["$name"]="$idx"; ACT["$name"]="$act"; STAT["$name"]="$stat"; CWD["$name"]="$cwd"; TS["$name"]="$ts"
-    WNAMES+=("$name")
-  done < <(tmux list-windows -a -F '#{window_index}	#{window_name}	#{window_activity}	#{pane_current_path}	#{?@claude_status,#{@claude_status},-}	#{?@claude_status_ts,#{@claude_status_ts},0}' 2>/dev/null)
-  local d t act live repos dc path idx prio sp sts bare
+    IDX["$name"]="$idx"; ACT["$name"]="$act"; STAT["$name"]="$stat"; CWD["$name"]="$cwd"; TS["$name"]="$ts"; WID["$name"]="$wid"
+  done < <(tmux list-windows -a -F '#{window_index}	#{window_name}	#{window_activity}	#{pane_current_path}	#{?@agent_status,#{@agent_status},-}	#{?@agent_status_ts,#{@agent_status_ts},0}	#{window_id}' 2>/dev/null)
+  local d t act live repos dc path idx prio sp sts bare wid cwd stat ts name
   # ── Task rows: dirs under $TASKS (with per-worktree info) ──
   for d in "$TASKS"/*/; do
     [ -d "$d" ] || continue
@@ -95,7 +107,7 @@ rows() {
     if [ -z "${ACT[$t]:-}" ] && [ "$showall" != 1 ] && ! recent_enough "$d"; then continue; fi
     act="${ACT[$t]:-0}"; idx="${IDX[$t]:-}"
     bare="${STAT[$t]:-}"; bare="${bare% $MARK}"   # bare status icon (no recency "•")
-    # live window -> its @claude_status icon (or a faint dot if no agent icon);
+    # live window -> its @agent_status icon (or a faint dot if no agent icon);
     # no window -> dimmer faint dot (stale).
     if [ -n "${ACT[$t]:-}" ]; then live="${STAT[$t]:-}"; [ -z "$live" ] && live="$DOT_LIVE"; else live="$DOT_STALE"; fi
     live="${live% $MARK}"   # drop the recency "•"; the tree already sorts by recency
@@ -103,31 +115,37 @@ rows() {
     sts="${TS[$t]:-0}"; [ "$sts" = 0 ] && sts="$act"   # fall back to activity if no status ts
     mapfile -t repos < <(worktrees "$d")
     dc=0; [ "$mode" = dirty ] && dc="$(dirty_count "$d")"
-    # tasks live under $ROOT/tasks, never at $ROOT itself -> always prio 3
-    printf '3\t%s\t%s\t%s\t%s\t%s %s %-40s %s\n' \
-      "$sp" "$sts" "$dc" "$t" "$(idxcol "$idx")" "$live" "$t" "${repos[*]:-—}"
+    # tasks live under $ROOT/tasks, never at $ROOT itself -> always prio 3.
+    # targetid = the task's live window id (empty if stale -> enter is a no-op).
+    printf '3\t%s\t%s\t%s\t%s\t%s\t%s %s %s \033[38;5;245m%s\033[0m\n' \
+      "$sp" "$sts" "$dc" "$t" "${WID[$t]:-}" "$(idxcol "$idx")" "$live" "$(namecol "$t")" "${repos[*]:-—}"
     ntask=$((ntask + 1))
   done
   # ── Plain window rows: any tmux window that isn't a task dir (pinned on top) ──
-  local name
-  for name in ${WNAMES[@]+"${WNAMES[@]}"}; do
+  # Iterate the raw per-window lines (not the name-keyed arrays) so two windows with
+  # the same name each get their own row, index, and id instead of collapsing to one.
+  local wline act2
+  for wline in ${WINLINES[@]+"${WINLINES[@]}"}; do
+    IFS=$'\t' read -r idx name act2 cwd stat ts wid <<< "$wline"
     [ -d "$TASKS/$name" ] && continue        # already shown as a task row
-    idx="${IDX[$name]:-}"
-    live="${STAT[$name]:-}"; [ -z "$live" ] && live="$DOT_LIVE"
+    [ "$stat" = "-" ] && stat=""
+    live="$stat"; [ -z "$live" ] && live="$DOT_LIVE"
     live="${live% $MARK}"   # drop the recency "•"
-    prio=1; [ "${CWD[$name]:-}" = "$ROOT" ] && prio=0
-    path="$(tilde "${CWD[$name]:-}")"
+    prio=1; [ "$cwd" = "$ROOT" ] && prio=0
+    path="$(tilde "$cwd")"
     # non-task windows: order by tmux window index (stable). window_activity churns
     # for a window whose cwd is a .claude dir (constant writes) -> it kept reshuffling
     # every refresh. Negate the index so the shared -k3,3rn sort yields index ascending.
-    printf '%s\t0\t%s\t0\t%s\t%s %s %-40s %s\n' \
-      "$prio" "$(( 0 - ${idx:-0} ))" "$name" "$(idxcol "$idx")" "$live" "$name" "$path"
+    printf '%s\t0\t%s\t0\t%s\t%s\t%s %s %s \033[38;5;245m%s\033[0m\n' \
+      "$prio" "$(( 0 - ${idx:-0} ))" "$name" "$wid" "$(idxcol "$idx")" "$live" "$(namecol "$name")" "$path"
     nwin=$((nwin + 1))
   done
   # ── Separator between the window group and the task group (only if both exist).
-  # Empty name field -> accept/preview/clean all treat it as a no-op row.
+  # Empty name field -> accept/preview/clean all treat it as a no-op row. Labeled
+  # "── tasks ──…" so the group boundary reads at a glance.
   if [ "$ntask" -gt 0 ] && [ "$nwin" -gt 0 ]; then
-    printf '2\t0\t0\t0\t\t\033[38;5;240m%s\033[0m\n' "$(printf '%*s' 50 '' | tr ' ' '─')"
+    # empty name (f5) + empty targetid (f6) -> not selectable / no-op on enter
+    printf '2\t0\t0\t0\t\t\t\033[38;5;240m── tasks %s\033[0m\n' "$(printf '%*s' 40 '' | tr ' ' '─')"
   fi
 }
 
@@ -148,16 +166,16 @@ label() {
   awk -v M="${LABELS_TMP:-$LABELS}" '
     BEGIN{FS=OFS="\t"; L="0123456789abcdefghijklmnopqrstuvwxyz"; w=0; t=0; printf "" > M}
     {
-      prio=$1; name=$2
-      if(prio==2){ disp="  " $3 }              # separator: blank slot, no label
+      prio=$1; name=$2; tgt=$3
+      if(prio==2){ disp="  " $4 }              # separator: blank slot, no label
       else {
         if(prio<=1){ idx=w; w++ }              # window: 0-9 then a-z
         else { start=(w>10?w:10); idx=start+t; t++ }  # task: from a, or after window letters
         c=(idx<length(L))?substr(L,idx+1,1):" "
         if(c!=" ") print c, NR > M
-        disp=sprintf("\033[38;5;240m%s\033[0m %s", c, $3)
+        disp=sprintf("\033[38;5;240m%s\033[0m %s", c, $4)
       }
-      print name, disp
+      print name, tgt, disp
     }'
 }
 
@@ -226,16 +244,19 @@ show_help() {
 
 preview() {
   [ -n "${1:-}" ] || return 0   # separator row (empty name): nothing to show
-  local t="$1" d="$TASKS/$1" w repo br ab ahead behind dirty act
-  act="$(tmux list-windows -a -F '#{window_name}	#{window_activity}' 2>/dev/null \
-        | awk -F'\t' -v t="$t" '$1==t{print $2}')"
+  local t="$1" id="${2:-}" d="$TASKS/$1" w repo br ab ahead behind dirty act
+  # Prefer the unique window id for the live-window lookups (name is ambiguous when
+  # two windows share it); fall back to name-match only when no id was passed.
+  if [ -n "$id" ]; then act="$(tmux display-message -p -t "$id" '#{window_activity}' 2>/dev/null)"
+  else act="$(tmux list-windows -a -F '#{window_name}	#{window_activity}' 2>/dev/null \
+        | awk -F'\t' -v t="$t" '$1==t{print $2}')"; fi
   # Plain (non-task) window: no worktrees to walk — just header + pane capture.
   if [ ! -d "$d" ]; then
     echo "window: $t"
     [ -n "$act" ] && echo "last active $(date -r "$act" '+%m-%d %H:%M' 2>/dev/null)"
     echo
     printf '%*s\n' "${FZF_PREVIEW_COLUMNS:-80}" '' | tr ' ' '─'
-    tmux capture-pane -ep -t "$t" 2>/dev/null
+    tmux capture-pane -ep -t "${id:-$t}" 2>/dev/null
     return
   fi
   echo "task: $t   [sort: $(cat "$STATE" 2>/dev/null || echo activity)]"
@@ -257,7 +278,7 @@ preview() {
     # full-width divider (fzf exports FZF_PREVIEW_COLUMNS to the preview process)
     printf '%*s\n' "${FZF_PREVIEW_COLUMNS:-80}" '' | tr ' ' '─'
     # -e keeps colors; nowrap preview truncates long lines like choose-tree does.
-    tmux capture-pane -ep -t "$t" 2>/dev/null
+    tmux capture-pane -ep -t "${id:-$t}" 2>/dev/null
   fi
 }
 
@@ -294,7 +315,7 @@ cleaned_msg() {
 case "${1:-}" in
   --list)     list_tasks ;;
   --jump)     jump_to "$2" ;;
-  --preview)  preview "$2" ;;
+  --preview)  preview "$2" "${3:-}" ;;
   --nextsort) next_sort ;;
   --toggleall) toggle_all ;;
   --help)     show_help ;;
@@ -311,21 +332,23 @@ case "${1:-}" in
     jump=()
     for k in 0 1 2 3 4 5 6 7 8 9; do jump+=(--bind "$k:transform(bash '$SELF' --jump $k)"); done
     for k in {a..z}; do jump+=(--bind "alt-$k:transform(bash '$SELF' --jump $k)"); done
-    # Start with the cursor on the row for the window we were on (field 1 = name).
+    # Start with the cursor on the row for the window we were on. Match by window id
+    # (field 2), not name (field 1) — names aren't unique, ids are. Fields per row:
+    # 1=name  2=targetid(@id)  3=display.
     listing="$(list_tasks)"
-    cur="$(tmux display-message -p '#{window_name}' 2>/dev/null || true)"
-    start_pos="$(printf '%s\n' "$listing" | awk -F'\t' -v c="$cur" '$1==c{print NR; exit}')"
+    cur="$(tmux display-message -p '#{window_id}' 2>/dev/null || true)"
+    start_pos="$(printf '%s\n' "$listing" | awk -F'\t' -v c="$cur" '$2==c{print NR; exit}')"
     out="$(printf '%s\n' "$listing" | fzf \
       "${jump[@]}" \
-      --sync --bind "start:pos(${start_pos:-1})+preview(bash '$SELF' --preview {1})" \
+      --sync --bind "start:pos(${start_pos:-1})+preview(bash '$SELF' --preview {1} {2})" \
       --track \
       --layout=reverse-list \
-      --ansi --multi --delimiter='\t' --with-nth=2 --no-hscroll \
+      --ansi --multi --delimiter='\t' --with-nth=3 --no-hscroll \
       --no-input \
       --jump-labels='123456789abcdefghijklmnopqrstuvwxyz' \
       --header '?: help' \
       --preview-window 'right,60%,nowrap' \
-      --bind "focus:preview(bash '$SELF' --preview {1})" \
+      --bind "focus:preview(bash '$SELF' --preview {1} {2})" \
       --bind 'j:down,k:up,g:first,G:last' \
       --bind '/:show-input+enable-search+clear-query' \
       --bind 'enter:accept' \
@@ -344,17 +367,12 @@ case "${1:-}" in
     #   ponytail: ctrl-o/ctrl-a only flip state; the next tick (<=2s) shows it,
     #   which keeps ONE reload chain (a manual reload would spawn a parallel one).
     #   Heavy only in dirty-sort mode, which git-walks every task each tick.
-    task="${out%%$'\t'*}"
-    if [ -n "$task" ]; then
-      # Resolve the name to a window-id and select by that. A bare name is an
-      # unreliable `select-window -t` target: a leading dot (.claude), a purely
-      # numeric name, or an fnmatch collision can silently resolve to the wrong
-      # (or current) window, so enter looks like it does nothing. Exact-match the
-      # name here, then target the unambiguous @id. (A stale task with no window
-      # yields no id -> no switch, which is correct.)
-      wid="$(tmux list-windows -a -F '#{window_name}	#{window_id}' 2>/dev/null \
-             | awk -F'\t' -v n="$task" '$1==n{print $2; exit}')"
-      [ -n "$wid" ] && tmux select-window -t "$wid"
-    fi
+    # Switch by the row's targetid (field 2 = @window-id), which is unique and
+    # unambiguous — a bare name is an unreliable `select-window -t` target (a leading
+    # dot like .claude, a numeric name, an fnmatch collision, or a duplicate name all
+    # mis-resolve). Empty targetid (separator, or a stale task with no window) -> no
+    # switch, which is correct.
+    target="$(printf '%s\n' "$out" | cut -f2)"
+    [ -n "$target" ] && tmux select-window -t "$target"
     ;;
 esac
