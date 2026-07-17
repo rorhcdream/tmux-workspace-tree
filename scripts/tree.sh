@@ -22,10 +22,18 @@ ROOT="$(tmux show-option -gqv @workspace_tree_root)"; ROOT="${ROOT:-$HOME/work}"
 WORK_WIN="$(tmux show-option -gqv @workspace_tree_work_window)"; WORK_WIN="${WORK_WIN:-0}"
 TASKS="$ROOT/tasks"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-# Per-user state dir (0700) instead of predictable /tmp/wstree.* names, which on
-# a shared host another user could pre-create or symlink-clobber.
+# Per-user state dir. It MUST be a real, owner-only directory we actually own:
+# on a shared host another user could pre-create the predictable path (or plant
+# a symlink there) and redirect our writes. mkdir alone isn't enough — it
+# succeeds on an existing attacker-owned dir — so we validate owner + type and,
+# if anything looks off, fall back to a freshly created private dir for this run
+# (state won't persist across popups then, but it's never attacker-controlled).
 WSDIR="${TMPDIR:-/tmp}/wstree-$(id -u)"
-mkdir -p "$WSDIR" 2>/dev/null || true
+mkdir -p "$WSDIR" 2>/dev/null
+_owner="$(stat -f '%u' "$WSDIR" 2>/dev/null || stat -c '%u' "$WSDIR" 2>/dev/null)"
+if [ -L "$WSDIR" ] || [ ! -d "$WSDIR" ] || [ "$_owner" != "$(id -u)" ]; then
+  WSDIR="$(mktemp -d "${TMPDIR:-/tmp}/wstree.XXXXXX")" || exit 1
+fi
 chmod 700 "$WSDIR" 2>/dev/null || true
 STATE="$WSDIR/sort"
 SHOWALL="$WSDIR/showall"
@@ -247,6 +255,9 @@ show_help() {
   read -rsn1 _
 }
 
+# Format an epoch as a date, portably: BSD/macOS `date -r`, else GNU `date -d @`.
+fmtdate() { date -r "$1" "$2" 2>/dev/null || date -d "@$1" "$2" 2>/dev/null; }
+
 preview() {
   [ -n "${1:-}" ] || return 0   # separator row (empty name): nothing to show
   local t="$1" id="${2:-}" d="$TASKS/$1" w repo br ab ahead behind dirty act
@@ -258,14 +269,14 @@ preview() {
   # Plain (non-task) window: no worktrees to walk — just header + pane capture.
   if [ ! -d "$d" ]; then
     echo "window: $t"
-    [ -n "$act" ] && echo "last active $(date -r "$act" '+%m-%d %H:%M' 2>/dev/null)"
+    [ -n "$act" ] && echo "last active $(fmtdate "$act" '+%m-%d %H:%M')"
     echo
     printf '%*s\n' "${FZF_PREVIEW_COLUMNS:-80}" '' | tr ' ' '─'
     tmux capture-pane -ep -t "${id:-$t}" 2>/dev/null
     return
   fi
   echo "task: $t   [sort: $(cat "$STATE" 2>/dev/null || echo activity)]"
-  if [ -n "$act" ]; then echo "window: live, last active $(date -r "$act" '+%m-%d %H:%M' 2>/dev/null)"
+  if [ -n "$act" ]; then echo "window: live, last active $(fmtdate "$act" '+%m-%d %H:%M')"
   else echo "window: none (stale)"; fi
   echo
   for w in "$d"/*/; do
