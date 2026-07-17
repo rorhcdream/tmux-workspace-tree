@@ -45,9 +45,15 @@ plain window switcher.
 
 ## Install
 
+Clone the repo, then point tmux at its entry script:
+
+```sh
+git clone https://github.com/rorhcdream/tmux-workspace-tree ~/.tmux/plugins/tmux-workspace-tree
+```
+
 ```tmux
-# ~/.tmux.conf
-run-shell '~/personal/tmux-workspace-tree/workspace-tree.tmux'
+# ~/.tmux.conf — adjust the path if you cloned elsewhere
+run-shell '~/.tmux/plugins/tmux-workspace-tree/workspace-tree.tmux'
 ```
 
 Reload tmux, then `prefix + w`.
@@ -58,7 +64,7 @@ Remove the `run-shell` line from `~/.tmux.conf`. To drop the key binding from th
 running server without restarting:
 
 ```sh
-bash ~/personal/tmux-workspace-tree/workspace-tree.tmux stop
+bash ~/.tmux/plugins/tmux-workspace-tree/workspace-tree.tmux stop
 ```
 
 The only files written are a few small scratch files (sort mode, the show-all
