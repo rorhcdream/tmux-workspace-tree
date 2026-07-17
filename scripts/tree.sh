@@ -26,7 +26,7 @@ STATE="${TMPDIR:-/tmp}/wstree.sort"
 SHOWALL="${TMPDIR:-/tmp}/wstree.showall"
 LABELS="${TMPDIR:-/tmp}/wstree.labels"   # jump label -> row position map (see label())
 HIDE_DAYS="$(tmux show-option -gqv @workspace_tree_hide_days)"; HIDE_DAYS="${HIDE_DAYS:-14}"
-# tmux-claude-status appends this recency marker to some icons ("✅ •"), making
+# tmux-agent-status appends this recency marker to some icons ("✅ •"), making
 # those cells wider than bare ones. We keep it but reserve a fixed slot (below).
 MARK="$(tmux show-option -gqv @agent_status_recent_marker)"; MARK="${MARK:-•}"
 # The status plugin's icons, used to group tasks (finished on top, then running).
