@@ -32,10 +32,16 @@ plain window switcher.
 - each row shows, left to right: the jump label, the original tmux **window number**
   (dim), the `@agent_status` icon, the name, and the repos (tasks) or `~`-abbreviated
   cwd (windows)
-- the icon is `🤖`/`💬`/`✅`; a faint `·` marks a row with no agent icon — lighter for a
-  live window, dimmer for a stale (no-window) task dir. (The status bar's recency `•`
-  marker is stripped here, since the list is already recency-sorted.)
+- the icon is `🤖`/`💬`/`✅`; a row with no agent icon is left blank (no placeholder
+  dot). (The status bar's recency `•` marker is stripped here, since the list is
+  already recency-sorted.)
 - **on open** the cursor starts on the row for the window you were in
+
+## Requirements
+
+- **bash 4+** — uses associative arrays and `mapfile`; macOS ships bash 3.2, so
+  `brew install bash` if you run the system one
+- **tmux 3.0+**, **fzf**, and **git** on `PATH`
 
 ## Install
 
@@ -55,8 +61,9 @@ running server without restarting:
 bash ~/personal/tmux-workspace-tree/workspace-tree.tmux stop
 ```
 
-Nothing is written to disk (only a `$TMPDIR/wstree.sort` scratch file), so there's
-nothing else to clean up.
+The only files written are a few small scratch files (sort mode, the show-all
+toggle, and the jump-label map) under a private per-user dir
+`$TMPDIR/wstree-<uid>/`, so there's nothing else to clean up.
 
 ## Options
 
@@ -73,3 +80,7 @@ the workflow of running task-start/task-clean from the `~/work` Claude session. 
 window is found by its cwd
 (`== @workspace_tree_root`), so it's stable under `renumber-windows`; if no window sits at
 that path, it falls back to the `@workspace_tree_work_window` index.
+
+> **Note:** `ctrl-x` is specific to a `task-start`/`task-clean` slash-command workflow.
+> If you don't use that, just ignore it — with no tasks marked it does nothing. The rest
+> of the popup (window/task switching, sorting, preview) works without it.
