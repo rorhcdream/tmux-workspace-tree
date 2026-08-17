@@ -23,12 +23,14 @@ plain window switcher.
 - **order** — the workspace-root window (cwd == `@workspace_tree_root`, i.e. the `~/work`
   Claude session) is pinned first, then all other non-task windows (ordered by tmux window
   index — stable, so a busy `.claude` window no longer reshuffles), then tasks. Tasks are
-  sub-grouped **finished → waiting → running**, each ordered by the status timestamp
-  (`@agent_status_ts`: finish time for done, trigger time for running). That timestamp is
-  stable, so running tasks don't reshuffle the way a `window_activity` sort would.
-  (`name`/`dirty` sort modes ignore the sub-grouping.) A dim `───` separator row
-  divides the window group from the task group (shown only when both exist; it's a
-  no-op if selected).
+  sub-grouped **finished → waiting → running**, each ordered by the stable status
+  timestamp (`@agent_status_ts`: finish time for done, trigger time for running).
+  (`name`/`dirty` modes ignore this sub-grouping.) A dim `───` separator row divides
+  the window group from the task group (shown only when both exist; it's a no-op if
+  selected).
+- **while open** — the popup publishes a reference-counted tmux marker
+  (`@agent_status_popup_count`) so the companion agent-status plugin doesn't treat the
+  covered pane as viewed and prematurely clear a newly completed status
 - each row shows, left to right: the jump label, the original tmux **window number**
   (dim), the `@agent_status` icon, the name, and the repos (tasks) or `~`-abbreviated
   cwd (windows)
@@ -44,7 +46,8 @@ plain window switcher.
 
 - **bash 4+** — uses associative arrays and `mapfile`; macOS ships bash 3.2, so
   `brew install bash` if you run the system one
-- **tmux 3.0+**, **fzf**, and **git** on `PATH`
+- **tmux 3.2+**, **fzf**, and **git** on `PATH` — 3.2 is where format number
+  operators (`#{e|+:…}`) landed; the popup's reference counter needs them
 
 ## Install
 

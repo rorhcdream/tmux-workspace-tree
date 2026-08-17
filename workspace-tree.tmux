@@ -11,6 +11,15 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "uninstall" ]; then
   exit 0
 fi
 
+# tmux has no public popup-active format or lifecycle hook. Maintain a global
+# reference count around its blocking display-popup command so companion status
+# plugins know the underlying pane is covered and has not actually been seen.
+# A count (rather than a boolean) remains correct with multiple attached clients.
+POPUP_COUNT_UP='#{e|+:#{?@agent_status_popup_count,#{@agent_status_popup_count},0},1}'
+POPUP_COUNT_DOWN='#{e|-:#{?@agent_status_popup_count,#{@agent_status_popup_count},1},1}'
 for k in $KEYS; do
-  tmux bind-key "$k" display-popup -E -w 100% -h 100% "bash '$DIR/scripts/tree.sh'"
+  # Pass one command-list string to bind-key. Shell-level `\;` arguments would
+  # split this tmux invocation itself and store only the first command.
+  tmux bind-key "$k" \
+    "set-option -Fg @agent_status_popup_count '$POPUP_COUNT_UP' ; display-popup -E -w 100% -h 100% \"bash '$DIR/scripts/tree.sh'\" ; set-option -Fg @agent_status_popup_count '$POPUP_COUNT_DOWN'"
 done

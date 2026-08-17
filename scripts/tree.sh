@@ -66,6 +66,9 @@ subprio_of() {
 worktrees() { local d="$1" w; for w in "$d"*/; do [ -e "$w/.git" ] && basename "$w"; done; }
 # true if the task dir has any file modified within HIDE_DAYS days
 recent_enough() { [ -n "$(find "$1" -maxdepth 3 -type f -mtime "-$HIDE_DAYS" -print -quit 2>/dev/null)" ]; }
+# tmux clocks use epoch seconds; tmux-agent-status uses epoch milliseconds.
+# Sorting requires a common unit so the source does not outweigh actual recency.
+epoch_seconds() { local n="${1:-0}"; [ "$n" -gt 9999999999 ] 2>/dev/null && n=$(( n / 1000 )); printf '%s' "$n"; }
 dirty_count() { # total dirty files across a task's worktrees
   local d="$1" w n=0
   for w in "$d"*/; do
@@ -125,7 +128,8 @@ rows() {
     if [ -n "${ACT[$t]:-}" ]; then live="${STAT[$t]:-}"; [ -z "$live" ] && live="$DOT_LIVE"; else live="$DOT_STALE"; fi
     live="${live% $MARK}"   # drop the recency "•"; the tree already sorts by recency
     sp="$(subprio_of "$bare")"
-    sts="${TS[$t]:-0}"; [ "$sts" = 0 ] && sts="$act"   # fall back to activity if no status ts
+    sts="$(epoch_seconds "${TS[$t]:-0}")"
+    [ "$sts" = 0 ] && sts="$act" # fall back to pane activity if no agent timestamp
     mapfile -t repos < <(worktrees "$d")
     dc=0; [ "$mode" = dirty ] && dc="$(dirty_count "$d")"
     # tasks live under $ROOT/tasks, never at $ROOT itself -> always prio 3.
@@ -255,29 +259,49 @@ show_help() {
   read -rsn1 _
 }
 
-# Format an epoch as a date, portably: BSD/macOS `date -r`, else GNU `date -d @`.
-fmtdate() { date -r "$1" "$2" 2>/dev/null || date -d "@$1" "$2" 2>/dev/null; }
+# Format an epoch as a date, portably: tmux uses seconds while tmux-agent-status
+# publishes milliseconds. Normalize the latter before calling BSD or GNU date.
+fmtdate() {
+  local epoch; epoch="$(epoch_seconds "$1")"
+  date -r "$epoch" "$2" 2>/dev/null || date -d "@$epoch" "$2" 2>/dev/null
+}
 
 preview() {
   [ -n "${1:-}" ] || return 0   # separator row (empty name): nothing to show
-  local t="$1" id="${2:-}" d="$TASKS/$1" w repo br ab ahead behind dirty act
+  local t="$1" id="${2:-}" d="$TASKS/$1" w repo br ab ahead behind dirty act status_act activity
   # Prefer the unique window id for the live-window lookups (name is ambiguous when
   # two windows share it); fall back to name-match only when no id was passed.
-  if [ -n "$id" ]; then act="$(tmux display-message -p -t "$id" '#{window_activity}' 2>/dev/null)"
-  else act="$(tmux list-windows -a -F '#{window_name}	#{window_activity}' 2>/dev/null \
-        | awk -F'\t' -v t="$t" '$1==t{print $2}')"; fi
+  if [ -n "$id" ]; then
+    activity="$(tmux display-message -p -t "$id" \
+      '#{window_activity}	#{?@agent_status_ts,#{@agent_status_ts},0}' 2>/dev/null)"
+  else
+    activity="$(tmux list-windows -a \
+      -F '#{window_name}	#{window_activity}	#{?@agent_status_ts,#{@agent_status_ts},0}' 2>/dev/null \
+      | awk -F'\t' -v t="$t" '$1==t{print $2 "\t" $3; exit}')"
+  fi
+  IFS=$'\t' read -r act status_act <<< "$activity"
   # Plain (non-task) window: no worktrees to walk — just header + pane capture.
   if [ ! -d "$d" ]; then
     echo "window: $t"
-    [ -n "$act" ] && echo "last active $(fmtdate "$act" '+%m-%d %H:%M')"
+    [ -n "$act" ] && echo "last output $(fmtdate "$act" '+%m-%d %H:%M')"
     echo
     printf '%*s\n' "${FZF_PREVIEW_COLUMNS:-80}" '' | tr ' ' '─'
     tmux capture-pane -ep -t "${id:-$t}" 2>/dev/null
     return
   fi
   echo "task: $t   [sort: $(cat "$STATE" 2>/dev/null || echo activity)]"
-  if [ -n "$act" ]; then echo "window: live, last active $(fmtdate "$act" '+%m-%d %H:%M')"
-  else echo "window: none (stale)"; fi
+  if [ -n "$act" ]; then
+    echo "window: live"
+    if [ "${status_act:-0}" -gt 0 ] 2>/dev/null; then
+      echo "agent activity $(fmtdate "$status_act" '+%m-%d %H:%M:%S')"
+      echo "last output    $(fmtdate "$act" '+%m-%d %H:%M')"
+    else
+      echo "agent activity unavailable (sorting falls back to last output)"
+      echo "last output    $(fmtdate "$act" '+%m-%d %H:%M')"
+    fi
+  else
+    echo "window: none (stale)"
+  fi
   echo
   for w in "$d"/*/; do
     [ -e "$w/.git" ] || continue
@@ -354,10 +378,13 @@ case "${1:-}" in
     listing="$(list_tasks)"
     cur="$(tmux display-message -p '#{window_id}' 2>/dev/null || true)"
     start_pos="$(printf '%s\n' "$listing" | awk -F'\t' -v c="$cur" '$2==c{print NR; exit}')"
+    # Avoid fzf's global --track on reload. The identity fields stay stable, but
+    # rendered rows do not: removing a window shifts jump labels and may renumber
+    # tmux indexes. Tracking the whole changing line can move focus/viewport and
+    # make a correctly sorted surviving task appear to have jumped elsewhere.
     out="$(printf '%s\n' "$listing" | fzf \
       "${jump[@]}" \
       --sync --bind "start:pos(${start_pos:-1})+preview(bash '$SELF' --preview {1} {2})" \
-      --track \
       --layout=reverse-list \
       --ansi --multi --delimiter='\t' --with-nth=3 --no-hscroll \
       --no-input \
@@ -376,10 +403,11 @@ case "${1:-}" in
       --bind "ctrl-o:execute-silent(bash '$SELF' --nextsort)" \
       --bind "ctrl-a:execute-silent(bash '$SELF' --toggleall)" \
       --bind "ctrl-x:execute-silent(bash '$SELF' --clean {+1})+preview(bash '$SELF' --cleaned {+1})+clear-selection" \
-      --bind "load:reload(sleep 2; bash '$SELF' --list)" \
+      --bind "load:refresh-preview+reload(sleep 2; bash '$SELF' --list)" \
     )" || exit 0
-    # ^ auto-refresh: 'load' re-fires after each reload, so this is a single
-    #   self-sustaining 2s loop (window/icon changes appear without reopening).
+    # ^ auto-refresh: 'load' re-fires after each reload, so this refreshes the
+    #   focused preview and starts the next iteration of one self-sustaining 2s
+    #   loop (window/icon changes appear without reopening).
     #   ponytail: ctrl-o/ctrl-a only flip state; the next tick (<=2s) shows it,
     #   which keeps ONE reload chain (a manual reload would spawn a parallel one).
     #   Heavy only in dirty-sort mode, which git-walks every task each tick.
