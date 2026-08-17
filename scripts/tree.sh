@@ -30,7 +30,13 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 # (state won't persist across popups then, but it's never attacker-controlled).
 WSDIR="${TMPDIR:-/tmp}/wstree-$(id -u)"
 mkdir -p "$WSDIR" 2>/dev/null
-_owner="$(stat -f '%u' "$WSDIR" 2>/dev/null || stat -c '%u' "$WSDIR" 2>/dev/null)"
+# BSD/macOS uses -f for a format string; GNU/Linux uses -c.  GNU stat also
+# accepts -f, but interprets it as "file system status" and can return a
+# successful non-owner value, so probing BSD syntax first is not portable.
+case "$(uname -s)" in
+  Darwin|*BSD) _owner="$(stat -f '%u' "$WSDIR" 2>/dev/null)" ;;
+  *)           _owner="$(stat -c '%u' "$WSDIR" 2>/dev/null)" ;;
+esac
 if [ -L "$WSDIR" ] || [ ! -d "$WSDIR" ] || [ "$_owner" != "$(id -u)" ]; then
   WSDIR="$(mktemp -d "${TMPDIR:-/tmp}/wstree.XXXXXX")" || exit 1
 fi
