@@ -338,15 +338,68 @@ root_window() {
   printf '%s' "${id:-$WORK_WIN}"
 }
 
+# Identify the agent below the target pane's shell. tmux's pane_current_command is
+# enough for native binaries, but npm-launched Codex reports "node" (or
+# "MainThread") instead. In that case, walk the process table below pane_pid and
+# choose the closest recognizable agent executable.
+pane_agent() {
+  local tgt="$1" current pane_pid detected
+  current="$(tmux display-message -p -t "$tgt" '#{pane_current_command}' 2>/dev/null)"
+  case "${current##*/}" in
+    codex*) printf 'codex'; return ;;
+    claude*) printf 'claude'; return ;;
+  esac
+
+  pane_pid="$(tmux display-message -p -t "$tgt" '#{pane_pid}' 2>/dev/null)"
+  [ -n "$pane_pid" ] || return
+  detected="$(ps -Ao pid=,ppid=,comm=,args= 2>/dev/null | awk -v root="$pane_pid" '
+    function depth(pid, cur, n) {
+      cur=pid
+      for(n=0; n<100 && cur; n++) {
+        if(cur==root) return n
+        cur=parent[cur]
+      }
+      return -1
+    }
+    function base(s) { sub(/^.*\//, "", s); return tolower(s) }
+    function kind(name, args, fields, n, i, seen, b) {
+      b=base(name)
+      if(b ~ /^codex/) return "codex"
+      if(b ~ /^claude/) return "claude"
+      if(b!="node" && b!="mainthread") return ""
+      n=split(args, fields, /[[:space:]]+/)
+      for(i=1; i<=n && seen<2; i++) {
+        if(fields[i]=="") continue
+        seen++
+        b=base(fields[i])
+        if(b=="codex") return "codex"
+        if(b=="claude") return "claude"
+      }
+      return ""
+    }
+    {
+      pid=$1; parent[pid]=$2; name[pid]=$3
+      $1=$2=$3=""; command[pid]=$0
+    }
+    END {
+      best=101; found=""
+      for(pid in parent) {
+        d=depth(pid)
+        if(d<0 || d>=best) continue
+        k=kind(name[pid], command[pid])
+        if(k!="") { best=d; found=k }
+      }
+      printf "%s", found
+    }')"
+  printf '%s' "$detected"
+}
+
 # Claude exposes task-clean as a slash command; Codex exposes it as a $ skill.
 # Keep the established Claude syntax as the fallback for an unrecognized wrapper.
 task_clean_prefix() {
-  local tgt="$1" client
-  client="$(tmux display-message -p -t "$tgt" '#{pane_current_command}' 2>/dev/null)"
-  case "${client##*/}" in
-    codex*) printf '$task-clean' ;;
-    claude*) printf '/task-clean' ;;
-    *)       printf '/task-clean' ;;
+  case "$(pane_agent "$1")" in
+    codex) printf '$task-clean' ;;
+    *)     printf '/task-clean' ;;
   esac
 }
 
