@@ -7,8 +7,8 @@
 #   0-9 / alt-a..z         jump straight to that row (labels shown dimmed at left)
 #   enter / ctrl-j (jump)  switch to task's window (ctrl-j = overlay number/letter labels)
 #   tab                    mark (multi-select)
-#   ctrl-x                 clean marked task(s): sends "clean up task: ..." to the
-#                          base work window (window 0's Claude at ~/work) and jumps there
+#   ctrl-x                 clean marked task(s): sends the client-appropriate
+#                          task-clean command to the workspace-root agent window
 #   ctrl-o                 cycle sort: activity | name | dirty
 #   ctrl-u/ctrl-d          scroll list;  ctrl-b/ctrl-f  scroll preview
 #   type                   fuzzy filter
@@ -328,7 +328,7 @@ preview() {
   fi
 }
 
-# The workspace-root window (the ~/work Claude session running task-start/clean).
+# The workspace-root window (the Claude or Codex session running task-start/clean).
 # Found by cwd == $ROOT so it's stable under renumber-windows; falls back to the
 # configured index if no window sits exactly at $ROOT.
 root_window() {
@@ -338,22 +338,42 @@ root_window() {
   printf '%s' "${id:-$WORK_WIN}"
 }
 
-# Fire the /task-clean slash command in the workspace-root window (one per marked
-# task) in the background — the popup stays open, focus stays put.
+# Claude exposes task-clean as a slash command; Codex exposes it as a $ skill.
+# Keep the established Claude syntax as the fallback for an unrecognized wrapper.
+task_clean_prefix() {
+  local tgt="$1" client
+  client="$(tmux display-message -p -t "$tgt" '#{pane_current_command}' 2>/dev/null)"
+  case "${client##*/}" in
+    codex*) printf '$task-clean' ;;
+    claude*) printf '/task-clean' ;;
+    *)       printf '/task-clean' ;;
+  esac
+}
+
+# Fire the client-appropriate task-clean command in the workspace-root window
+# (one per marked task) in the background — the popup stays open, focus stays put.
 clean_tasks() {
   [ "$#" -eq 0 ] && return
-  local t tgt; tgt="$(root_window)"
+  local t tgt prefix command
+  tgt="$(root_window)"
+  prefix="$(task_clean_prefix "$tgt")"
   for t in "$@"; do
     [ -n "$t" ] || continue     # skip a marked separator row
-    tmux send-keys -t "$tgt" "/task-clean $t" Enter
+    printf -v command '%s %s' "$prefix" "$t"
+    tmux send-keys -t "$tgt" -l -- "$command"
+    # Let Codex consume the pasted command before submitting it. Sending the text
+    # and Enter together can leave the command sitting unsubmitted in the prompt.
+    sleep 0.1
+    tmux send-keys -t "$tgt" Enter
   done
 }
 
 # Preview-pane confirmation shown right after ctrl-x (send-keys is silent + keeps
 # the popup open, so without this there's no sign it fired). Clears on next focus.
 cleaned_msg() {
-  local t
-  printf '\n  \033[32m🧹 launched /task-clean\033[0m in the work window for:\n\n'
+  local t prefix
+  prefix="$(task_clean_prefix "$(root_window)")"
+  printf '\n  \033[32m🧹 launched %s\033[0m in the work window for:\n\n' "$prefix"
   for t in "$@"; do [ -n "$t" ] && printf '     • %s\n' "$t"; done
   printf '\n  \033[2m(these rows disappear on the next refresh)\033[0m\n'
 }

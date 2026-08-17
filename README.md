@@ -10,9 +10,10 @@ plain window switcher.
 - **/** — reveal the search bar and fuzzy-filter (j/k/g/G and the jump keys stay bound)
 - **enter** / **ctrl-j** — switch to that window (ctrl-j shows an overlay of jump labels)
 - **tab** — mark (multi-select)
-- **ctrl-x** — clean marked task(s): sends `/task-clean <name>` (one per marked task)
-  to the workspace-root window in the background; the popup stays open and focus stays put,
-  and the preview shows a brief confirmation (the cleaned rows vanish on the next refresh)
+- **ctrl-x** — clean marked task(s): detects Codex or Claude in the workspace-root
+  window, then sends `$task-clean <name>` or `/task-clean <name>` respectively (one per
+  marked task); the popup stays open and focus stays put, and the preview shows a brief
+  confirmation (the cleaned rows vanish on the next refresh)
 - **ctrl-o** — cycle sort: activity → name → dirty
 - **ctrl-a** — toggle hidden tasks (by default, tasks with no window and untouched
   for more than `@workspace_tree_hide_days` days are hidden)
@@ -21,7 +22,7 @@ plain window switcher.
 - **preview** — per-worktree branch, ahead/behind, dirty count (or window cwd/info for
   non-task windows), plus a colored pane capture (`nowrap` so long lines truncate)
 - **order** — the workspace-root window (cwd == `@workspace_tree_root`, i.e. the `~/work`
-  Claude session) is pinned first, then all other non-task windows (ordered by tmux window
+  agent session) is pinned first, then all other non-task windows (ordered by tmux window
   index — stable, so a busy `.claude` window no longer reshuffles), then tasks. Tasks are
   sub-grouped **finished → waiting → running**, each ordered by the stable status
   timestamp (`@agent_status_ts`: finish time for done, trigger time for running).
@@ -86,13 +87,13 @@ set -g @workspace_tree_work_window 0      # fallback work-window index (see belo
 set -g @workspace_tree_hide_days   14     # hide no-window tasks untouched > N days (ctrl-a shows all)
 ```
 
-`ctrl-x` doesn't run `task-clean` itself — it sends `/task-clean <name>` (one per marked
-task) to the **workspace-root window** in the background (the popup stays open), matching
-the workflow of running task-start/task-clean from the `~/work` Claude session. That
-window is found by its cwd
+`ctrl-x` doesn't run `task-clean` itself. It detects the client running in the
+**workspace-root window**, then sends `$task-clean <name>` to Codex or
+`/task-clean <name>` to Claude (one per marked task) in the background. The popup stays
+open. That window is found by its cwd
 (`== @workspace_tree_root`), so it's stable under `renumber-windows`; if no window sits at
 that path, it falls back to the `@workspace_tree_work_window` index.
 
-> **Note:** `ctrl-x` is specific to a `task-start`/`task-clean` slash-command workflow.
+> **Note:** `ctrl-x` is specific to the Claude/Codex `task-start`/`task-clean` workflow.
 > If you don't use that, just ignore it — with no tasks marked it does nothing. The rest
 > of the popup (window/task switching, sorting, preview) works without it.
