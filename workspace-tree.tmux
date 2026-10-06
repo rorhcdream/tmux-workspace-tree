@@ -5,11 +5,24 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # @workspace_tree_key may list several keys (space-separated), e.g. 'C-w w'.
 KEYS="$(tmux show-option -gqv @workspace_tree_key)"; KEYS="${KEYS:-w}"
 
+# Indexed hooks preserve other plugins' handlers.
+UNREAD_HOOKS=(session-window-changed after-select-window client-session-changed client-attached)
+UNREAD_HOOK_INDEX=7341
+
 # Teardown: `workspace-tree.tmux stop` — remove the key binding(s).
 if [ "${1:-}" = "stop" ] || [ "${1:-}" = "uninstall" ]; then
   for k in $KEYS; do tmux unbind-key "$k" 2>/dev/null || true; done
+  for hook in "${UNREAD_HOOKS[@]}"; do
+    tmux set-hook -gu "$hook[$UNREAD_HOOK_INDEX]"
+  done
   exit 0
 fi
+
+# Window-local marks follow renames and index changes; clear on window entry.
+for hook in "${UNREAD_HOOKS[@]}"; do
+  tmux set-hook -g "$hook[$UNREAD_HOOK_INDEX]" \
+    'set-option -wu @workspace_tree_unread'
+done
 
 # tmux has no public popup-active format or lifecycle hook. Maintain a global
 # reference count around its blocking display-popup command so companion status

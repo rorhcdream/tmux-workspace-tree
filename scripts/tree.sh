@@ -6,6 +6,7 @@
 # choose-tree-style keys, plus what choose-tree can't do:
 #   0-9 / alt-a..z         jump straight to that row (labels shown dimmed at left)
 #   enter / ctrl-j (jump)  switch to task's window (ctrl-j = overlay number/letter labels)
+#   ctrl-r                 toggle revisit-later mark on the focused window
 #   tab                    mark (multi-select)
 #   ctrl-x                 clean marked task(s): sends the client-appropriate
 #                          task-clean command to the workspace-root agent window
@@ -58,14 +59,15 @@ I_WAIT="$(tmux show-option -gqv @agent_status_waiting)"; I_WAIT="${I_WAIT:-💬}
 DOT_LIVE='  '
 DOT_STALE='  '
 
-# task sub-order from the (bare) status icon: finished first, then waiting, then
-# running, then no icon. Within each, list_tasks sorts by the status timestamp.
+# Task order: finished, revisit later, waiting, running, then no icon.
+# Marked and running tasks hold a fixed position by window index (see rows()).
 subprio_of() {
+  if [ "${2:-0}" = 1 ]; then echo 1; return; fi
   case "$1" in
     "$I_DONE") echo 0 ;;
-    "$I_WAIT") echo 1 ;;
-    "$I_WORK") echo 2 ;;
-    *)         echo 3 ;;
+    "$I_WAIT") echo 2 ;;
+    "$I_WORK") echo 3 ;;
+    *)         echo 4 ;;
   esac
 }
 
@@ -86,6 +88,8 @@ dirty_count() { # total dirty files across a task's worktrees
 
 # dim, right-aligned 2-wide tmux window index (blank slot if the row has no window)
 idxcol() { if [ -n "$1" ]; then printf '\033[38;5;240m%2s\033[0m' "$1"; else printf '  '; fi; }
+# The revisit mark takes priority in the two-cell agent icon slot.
+unread_icon() { printf '🟡'; }
 # ~-abbreviate a home path (bash's ${v/#$HOME/~} is unreliable, so strip the prefix)
 tilde() { case "$1" in "$HOME") printf '~' ;; "$HOME"/*) printf '~%s' "${1#$HOME}" ;; *) printf '%s' "$1" ;; esac; }
 # Fixed-width name cell: pad short names, ellipsis-truncate long ones (…), so the
@@ -100,26 +104,27 @@ namecol() {
 # emit: <prio>\t<subprio>\t<sortts>\t<dirty-or-0>\t<name>\t<targetid>\t<display>
 # prio groups rows: 0 = workspace-root window (cwd == $ROOT, e.g. the ~/work Claude
 # session), 1 = other non-task windows (on top), 2 = separator line, 3 = tasks.
-# subprio sub-orders tasks (finished, waiting, running, none). sortts is the key
-# list_tasks sorts each group by: for tasks the status timestamp (stable), else
-# window_activity. targetid is the tmux @window-id enter/jump switches to — unique
+# subprio sub-orders tasks (finished, revisit later, waiting, running, none). sortts is the key
+# list_tasks sorts each group by: the status timestamp for finished/waiting tasks,
+# and the negated window index for running tasks and for non-task windows.
+# targetid is the tmux @window-id enter/jump switches to — unique
 # even when two windows share a name (name alone is ambiguous).
 # (cwd, not window index: renumber-windows shifts indices, so index 0 is unreliable.)
 rows() {
   local mode="$1" showall ntask=0 nwin=0
   showall="$(cat "$SHOWALL" 2>/dev/null || echo 0)"
-  declare -A ACT STAT CWD IDX TS WID
+  declare -A ACT STAT CWD IDX TS WID UNREAD
   local -a WINLINES=()
   # @agent_status / @agent_status_ts are often empty; a bare tab-IFS read would
   # collapse those empties and shift fields, so emit '-'/'0' sentinels for them.
   # We stash each raw line (sentinels intact) in WINLINES and iterate THAT for the
   # window rows below — the name-keyed arrays collapse duplicate names (two windows
   # named "server" would share one entry), but each raw line is distinct.
-  while IFS=$'\t' read -r idx name act cwd stat ts wid; do
-    WINLINES+=("$idx"$'\t'"$name"$'\t'"$act"$'\t'"$cwd"$'\t'"$stat"$'\t'"$ts"$'\t'"$wid")
+  while IFS=$'\t' read -r idx name act cwd stat ts wid unread; do
+    WINLINES+=("$idx"$'\t'"$name"$'\t'"$act"$'\t'"$cwd"$'\t'"$stat"$'\t'"$ts"$'\t'"$wid"$'\t'"$unread")
     [ "$stat" = "-" ] && stat=""
-    IDX["$name"]="$idx"; ACT["$name"]="$act"; STAT["$name"]="$stat"; CWD["$name"]="$cwd"; TS["$name"]="$ts"; WID["$name"]="$wid"
-  done < <(tmux list-windows -a -F '#{window_index}	#{window_name}	#{window_activity}	#{pane_current_path}	#{?@agent_status,#{@agent_status},-}	#{?@agent_status_ts,#{@agent_status_ts},0}	#{window_id}' 2>/dev/null)
+    IDX["$name"]="$idx"; ACT["$name"]="$act"; STAT["$name"]="$stat"; CWD["$name"]="$cwd"; TS["$name"]="$ts"; WID["$name"]="$wid"; UNREAD["$name"]="$unread"
+  done < <(tmux list-windows -a -F '#{window_index}	#{window_name}	#{window_activity}	#{pane_current_path}	#{?@agent_status,#{@agent_status},-}	#{?@agent_status_ts,#{@agent_status_ts},0}	#{window_id}	#{?@workspace_tree_unread,#{@workspace_tree_unread},0}' 2>/dev/null)
   local d t act live repos dc path idx prio sp sts bare wid cwd stat ts name
   # ── Task rows: dirs under $TASKS (with per-worktree info) ──
   for d in "$TASKS"/*/; do
@@ -133,9 +138,20 @@ rows() {
     # no window -> dimmer faint dot (stale).
     if [ -n "${ACT[$t]:-}" ]; then live="${STAT[$t]:-}"; [ -z "$live" ] && live="$DOT_LIVE"; else live="$DOT_STALE"; fi
     live="${live% $MARK}"   # drop the recency "•"; the tree already sorts by recency
-    sp="$(subprio_of "$bare")"
+    [ "${UNREAD[$t]:-0}" = 1 ] && live="$(unread_icon)"
+    sp="$(subprio_of "$bare" "${UNREAD[$t]:-0}")"
     sts="$(epoch_seconds "${TS[$t]:-0}")"
     [ "$sts" = 0 ] && sts="$act" # fall back to pane activity if no agent timestamp
+    # Running tasks order by window index, NOT by the status timestamp: that
+    # timestamp is the current turn's trigger time, and an agent restamps it on
+    # every new turn (codex on each task_started), so a timestamp sort reshuffles
+    # the running group while you are looking at it — and the jump labels move
+    # with the rows. Finished/waiting keep timestamp order: there it only moves on
+    # a real transition, and "most recently finished" is the point of the group.
+    # Negate the index so the shared -k3,3rn sort yields ascending index, exactly
+    # like the non-task window rows below.
+    # Marked tasks also stay in index order while their agent status changes.
+    case "$sp" in 1|3) sts=$(( 0 - ${idx:-0} )) ;; esac
     mapfile -t repos < <(worktrees "$d")
     dc=0; [ "$mode" = dirty ] && dc="$(dirty_count "$d")"
     # tasks live under $ROOT/tasks, never at $ROOT itself -> always prio 3.
@@ -149,11 +165,12 @@ rows() {
   # the same name each get their own row, index, and id instead of collapsing to one.
   local wline act2
   for wline in ${WINLINES[@]+"${WINLINES[@]}"}; do
-    IFS=$'\t' read -r idx name act2 cwd stat ts wid <<< "$wline"
+    IFS=$'\t' read -r idx name act2 cwd stat ts wid unread <<< "$wline"
     [ -d "$TASKS/$name" ] && continue        # already shown as a task row
     [ "$stat" = "-" ] && stat=""
     live="$stat"; [ -z "$live" ] && live="$DOT_LIVE"
     live="${live% $MARK}"   # drop the recency "•"
+    [ "$unread" = 1 ] && live="$(unread_icon)"
     prio=1; [ "$cwd" = "$ROOT" ] && prio=0
     path="$(tilde "$cwd")"
     # non-task windows: order by tmux window index (stable). window_activity churns
@@ -209,9 +226,10 @@ jump_to() { awk -F'\t' -v c="$1" '$1==c{printf "pos(%d)+accept", $2; exit}' "$LA
 list_tasks() {
   # Fields: prio(1) subprio(2) sortts(3) dirty(4) name(5) display(6+).
   # prio first keeps groups (root / non-task / separator / tasks) pinned. Default (activity)
-  # mode also honors subprio (finished, then running) and sorts each subgroup by
-  # the status timestamp desc — stable, unlike churning window_activity. name/dirty
-  # modes ignore subprio for a straight alphabetical / dirtiest-first view.
+  # mode also honors subprio (finished, revisit later, waiting, running); finished
+  # and waiting sort by status timestamp desc, while marked and running tasks keep a
+  # fixed position by window index. name/dirty modes ignore subprio for a straight
+  # alphabetical / dirtiest-first view.
   local mode; mode="$(cat "$STATE" 2>/dev/null || echo activity)"
   # cut -f1,5-: keep prio(1) + name(5) display(6) -> label() sees prio,name,display.
   # label() writes the jump map to $LABELS_TMP; we mv it onto $LABELS atomically so
@@ -235,6 +253,18 @@ toggle_all() {
   [ "$cur" = 1 ] && echo 0 >"$SHOWALL" || echo 1 >"$SHOWALL"
 }
 
+toggle_unread() {
+  local id="${1:-}" current
+  # Separators and tasks without a live window have no target.
+  [ -n "$id" ] || return 0
+  current="$(tmux show-option -wqv -t "$id" @workspace_tree_unread 2>/dev/null)" || return 0
+  if [ "$current" = 1 ]; then
+    tmux set-option -wu -t "$id" @workspace_tree_unread
+  else
+    tmux set-option -w -t "$id" @workspace_tree_unread 1
+  fi
+}
+
 show_help() {
   printf '\e[2J\e[H'   # clear screen: `execute` reuses the terminal, else re-opens stack
   local B=$'\e[1m' D=$'\e[2m' C=$'\e[36m' M=$'\e[35m' R=$'\e[0m'
@@ -252,6 +282,7 @@ show_help() {
   row 'ctrl-b/ctrl-f'  'scroll preview'
   sec ACT
   row 'enter'          'switch to that window'
+  row 'ctrl-r'         'toggle 🟡 revisit later (clears on entry)'
   row 'tab'            'mark (multi-select)'
   row 'ctrl-x'         'clean marked task(s) — popup stays open'
   sec VIEW
@@ -409,6 +440,17 @@ clean_tasks() {
   [ "$#" -eq 0 ] && return
   local t tgt prefix command
   tgt="$(root_window)"
+  # Leave copy-mode first. A pane in copy-mode consumes the pasted command as key
+  # presses instead of text, and with mode-keys vi the leading "/" of "/task-clean"
+  # is the search key: tmux opens its "(search down)" command-prompt. That prompt is
+  # a CLIENT OVERLAY, and a client holds only one — so tmux tears down our popup to
+  # show it. The tree vanishes, the command never reaches the agent, and the rest of
+  # the string is typed into a search box. pane_in_mode reports the window's active
+  # pane — the same pane send-keys targets — so `-X cancel` fires only when there is
+  # actually a mode to leave.
+  if [ "$(tmux display-message -p -t "$tgt" '#{pane_in_mode}' 2>/dev/null)" = 1 ]; then
+    tmux send-keys -t "$tgt" -X cancel 2>/dev/null || true
+  fi
   prefix="$(task_clean_prefix "$tgt")"
   for t in "$@"; do
     [ -n "$t" ] || continue     # skip a marked separator row
@@ -437,6 +479,7 @@ case "${1:-}" in
   --preview)  preview "$2" "${3:-}" ;;
   --nextsort) next_sort ;;
   --toggleall) toggle_all ;;
+  --toggle-unread) toggle_unread "${2:-}" ;;
   --help)     show_help ;;
   --clean)    shift; clean_tasks "$@" ;;
   --cleaned)  shift; cleaned_msg "$@" ;;
@@ -476,6 +519,7 @@ case "${1:-}" in
       --bind 'enter:accept' \
       --bind 'ctrl-j:jump-accept' \
       --bind 'tab:toggle+down' \
+      --bind "ctrl-r:execute-silent(bash '$SELF' --toggle-unread {2})" \
       --bind 'ctrl-u:up+up+up+up+up' --bind 'ctrl-d:down+down+down+down+down' \
       --bind 'ctrl-b:preview-half-page-up' --bind 'ctrl-f:preview-half-page-down' \
       --bind "?:execute(bash '$SELF' --help)" \
@@ -496,6 +540,10 @@ case "${1:-}" in
     # mis-resolve). Empty targetid (separator, or a stale task with no window) -> no
     # switch, which is correct.
     target="$(printf '%s\n' "$out" | cut -f2)"
-    [ -n "$target" ] && tmux select-window -t "$target"
+    if [ -n "$target" ] && tmux select-window -t "$target"; then
+      # Also clear explicitly: an already-open tree may predate hook installation,
+      # and selecting the current window need not trigger a window-change hook.
+      tmux set-option -wu -t "$target" @workspace_tree_unread
+    fi
     ;;
 esac

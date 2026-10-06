@@ -9,6 +9,12 @@ plain window switcher.
 - **0-9 / M-a…z** — jump straight to that row (labels are shown dimmed at the left, like choose-tree). Digits label the non-task windows, letters label the tasks (letters spill over if there are more than ten windows); the separator gets no label
 - **/** — reveal the search bar and fuzzy-filter (j/k/g/G and the jump keys stay bound)
 - **enter** / **ctrl-j** — switch to that window (ctrl-j shows an overlay of jump labels)
+- **ctrl-r** — toggle a **🟡** revisit-later mark on the focused window.
+  The dot replaces the agent icon while marked, using the same column.
+  It persists after closing the tree and clears when you enter that window, through
+  the tree or normal tmux navigation. This is separate from Tab's cleanup selection;
+  tasks without a live window cannot be marked. Marks appear on the next refresh
+  (within 2 seconds).
 - **tab** — mark (multi-select)
 - **ctrl-x** — clean marked task(s): detects Codex or Claude in the workspace-root
   window, then sends `$task-clean <name>` or `/task-clean <name>` respectively (one per
@@ -24,8 +30,13 @@ plain window switcher.
 - **order** — the workspace-root window (cwd == `@workspace_tree_root`, i.e. the `~/work`
   agent session) is pinned first, then all other non-task windows (ordered by tmux window
   index — stable, so a busy `.claude` window no longer reshuffles), then tasks. Tasks are
-  sub-grouped **finished → waiting → running**, each ordered by the stable status
-  timestamp (`@agent_status_ts`: finish time for done, trigger time for running).
+  sub-grouped **finished → 🟡 revisit later → waiting → running**. Marked tasks
+  are ordered by window index, even if their underlying agent status changes.
+  Finished and waiting rows are ordered by
+  the status timestamp (`@agent_status_ts` — finish time, or when the prompt appeared),
+  newest first. **Running rows are ordered by tmux window index**, so they hold a fixed
+  position: their timestamp is the current turn's trigger time and is restamped on every
+  new turn, which otherwise reshuffles the group (and its jump labels) under the cursor.
   (`name`/`dirty` modes ignore this sub-grouping.) A dim `───` separator row divides
   the window group from the task group (shown only when both exist; it's a no-op if
   selected).
@@ -33,7 +44,8 @@ plain window switcher.
   (`@agent_status_popup_count`) so the companion agent-status plugin doesn't treat the
   covered pane as viewed and prematurely clear a newly completed status
 - each row shows, left to right: the jump label, the original tmux **window number**
-  (dim), the `@agent_status` icon, the name, and the repos (tasks) or `~`-abbreviated
+  (dim), the `@agent_status` icon (or revisit-later dot), the name, and the repos
+  (tasks) or `~`-abbreviated
   cwd (windows)
 - the icon is `🤖`/`💬`/`✅`; a row with no agent icon is left blank (no placeholder
   dot). (The status bar's recency `•` marker is stripped here, since the list is
@@ -73,6 +85,10 @@ running server without restarting:
 ```sh
 bash ~/.tmux/plugins/tmux-workspace-tree/workspace-tree.tmux stop
 ```
+
+Stopping also removes this plugin's window-entry hooks. Revisit marks are stored
+as window-local tmux options (`@workspace_tree_unread`) and disappear with the
+window or tmux server.
 
 The only files written are a few small scratch files (sort mode, the show-all
 toggle, and the jump-label map) under a private per-user dir
