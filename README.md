@@ -9,6 +9,8 @@ plain window switcher.
 - **0-9 / M-a…z** — jump straight to that row (labels are shown dimmed at the left, like choose-tree). Digits label the non-task windows, letters label the tasks (letters spill over if there are more than ten windows); the separator gets no label
 - **/** — reveal the search bar and fuzzy-filter (j/k/g/G and the jump keys stay bound)
 - **enter** / **ctrl-j** — switch to that window (ctrl-j shows an overlay of jump labels)
+  and acknowledge its agent status, so a done icon clears on the next status refresh
+  even when the popup prevented the normal window-entry hook from recording the visit
 - **ctrl-r** — toggle a **🟡** revisit-later mark on the focused window.
   The dot replaces the agent icon while marked, using the same column.
   It persists after closing the tree and clears when you enter that window, through
@@ -28,8 +30,8 @@ plain window switcher.
 - **preview** — per-worktree branch, ahead/behind, dirty count (or window cwd/info for
   non-task windows), plus a colored pane capture (`nowrap` so long lines truncate)
 - **order** — the workspace-root window (cwd == `@workspace_tree_root`, i.e. the `~/work`
-  agent session) is pinned first, then all other non-task windows (ordered by tmux window
-  index — stable, so a busy `.claude` window no longer reshuffles), then tasks. Tasks are
+  agent session) is pinned first, then all other non-task windows (in ascending
+  window-number order), then tasks. Tasks are
   sub-grouped **finished → 🟡 revisit later → waiting → running**. Marked tasks
   are ordered by window index, even if their underlying agent status changes.
   Finished and waiting rows are ordered by
@@ -37,6 +39,10 @@ plain window switcher.
   newest first. **Running rows are ordered by tmux window index**, so they hold a fixed
   position: their timestamp is the current turn's trigger time and is restamped on every
   new turn, which otherwise reshuffles the group (and its jump labels) under the cursor.
+  Tasks without an icon come last, sorted by the newer of tmux window activity
+  and `@agent_status_ts`, newest first. Terminal output from Codex or any other
+  program counts, including redraws;
+  without agent-status hooks this measures terminal activity rather than turn completion.
   (`name`/`dirty` modes ignore this sub-grouping.) A dim `───` separator row divides
   the window group from the task group (shown only when both exist; it's a no-op if
   selected).

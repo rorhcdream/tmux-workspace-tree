@@ -77,6 +77,13 @@ recent_enough() { [ -n "$(find "$1" -maxdepth 3 -type f -mtime "-$HIDE_DAYS" -pr
 # tmux clocks use epoch seconds; tmux-agent-status uses epoch milliseconds.
 # Sorting requires a common unit so the source does not outweigh actual recency.
 epoch_seconds() { local n="${1:-0}"; [ "$n" -gt 9999999999 ] 2>/dev/null && n=$(( n / 1000 )); printf '%s' "$n"; }
+# An icon may be cleared while its old status timestamp remains. Neither source
+# should mask newer activity; this also handles agent timestamps in milliseconds.
+latest_activity() {
+  local output status
+  output="$(epoch_seconds "${1:-0}")"; status="$(epoch_seconds "${2:-0}")"
+  if [ "$status" -gt "$output" ]; then printf '%s' "$status"; else printf '%s' "$output"; fi
+}
 dirty_count() { # total dirty files across a task's worktrees
   local d="$1" w n=0
   for w in "$d"*/; do
@@ -105,8 +112,8 @@ namecol() {
 # prio groups rows: 0 = workspace-root window (cwd == $ROOT, e.g. the ~/work Claude
 # session), 1 = other non-task windows (on top), 2 = separator line, 3 = tasks.
 # subprio sub-orders tasks (finished, revisit later, waiting, running, none). sortts is the key
-# list_tasks sorts each group by: the status timestamp for finished/waiting tasks,
-# and the negated window index for running tasks and for non-task windows.
+# list_tasks sorts finished/waiting tasks by status timestamp, marked/running
+# tasks and non-task windows by index, and iconless tasks by latest activity.
 # targetid is the tmux @window-id enter/jump switches to — unique
 # even when two windows share a name (name alone is ambiguous).
 # (cwd, not window index: renumber-windows shifts indices, so index 0 is unreliable.)
@@ -151,7 +158,10 @@ rows() {
     # Negate the index so the shared -k3,3rn sort yields ascending index, exactly
     # like the non-task window rows below.
     # Marked tasks also stay in index order while their agent status changes.
-    case "$sp" in 1|3) sts=$(( 0 - ${idx:-0} )) ;; esac
+    case "$sp" in
+      1|3) sts=$(( 0 - ${idx:-0} )) ;;
+      4) sts="$(latest_activity "$act" "${TS[$t]:-0}")" ;;
+    esac
     mapfile -t repos < <(worktrees "$d")
     dc=0; [ "$mode" = dirty ] && dc="$(dirty_count "$d")"
     # tasks live under $ROOT/tasks, never at $ROOT itself -> always prio 3.
@@ -173,11 +183,11 @@ rows() {
     [ "$unread" = 1 ] && live="$(unread_icon)"
     prio=1; [ "$cwd" = "$ROOT" ] && prio=0
     path="$(tilde "$cwd")"
-    # non-task windows: order by tmux window index (stable). window_activity churns
-    # for a window whose cwd is a .claude dir (constant writes) -> it kept reshuffling
-    # every refresh. Negate the index so the shared -k3,3rn sort yields index ascending.
+    # Negate the index so the descending timestamp sort keeps window numbers
+    # ascending, regardless of terminal output or agent-status timestamps.
+    sts=$(( 0 - ${idx:-0} ))
     printf '%s\t0\t%s\t0\t%s\t%s\t%s %s %s \033[38;5;245m%s\033[0m\n' \
-      "$prio" "$(( 0 - ${idx:-0} ))" "$name" "$wid" "$(idxcol "$idx")" "$live" "$(namecol "$name")" "$path"
+      "$prio" "$sts" "$name" "$wid" "$(idxcol "$idx")" "$live" "$(namecol "$name")" "$path"
     nwin=$((nwin + 1))
   done
   # ── Separator between the window group and the task group (only if both exist).
@@ -228,7 +238,8 @@ list_tasks() {
   # prio first keeps groups (root / non-task / separator / tasks) pinned. Default (activity)
   # mode also honors subprio (finished, revisit later, waiting, running); finished
   # and waiting sort by status timestamp desc, while marked and running tasks keep a
-  # fixed position by window index. name/dirty modes ignore subprio for a straight
+  # fixed position by window index. Iconless tasks use latest activity. name/dirty
+  # modes ignore subprio for a straight
   # alphabetical / dirtiest-first view.
   local mode; mode="$(cat "$STATE" 2>/dev/null || echo activity)"
   # cut -f1,5-: keep prio(1) + name(5) display(6) -> label() sees prio,name,display.
@@ -262,6 +273,20 @@ toggle_unread() {
     tmux set-option -wu -t "$id" @workspace_tree_unread
   else
     tmux set-option -w -t "$id" @workspace_tree_unread 1
+  fi
+}
+
+acknowledge_window() {
+  local id="$1" activity ts seen
+  tmux set-option -wu -t "$id" @workspace_tree_unread
+  # select-window runs while the popup still covers the pane, so the status
+  # plugin's normal entry hook deliberately skips its acknowledgement. Record
+  # the observed status boundary explicitly; a later completion stays unread.
+  activity="$(tmux display-message -p -t "$id" \
+    '#{?@agent_status_ts,#{@agent_status_ts},0}	#{?@agent_status_seen,#{@agent_status_seen},0}' 2>/dev/null)" || return 0
+  IFS=$'\t' read -r ts seen <<< "$activity"
+  if [ "${ts:-0}" -gt "${seen:-0}" ] 2>/dev/null; then
+    tmux set-option -w -t "$id" @agent_status_seen "$ts"
   fi
 }
 
@@ -543,7 +568,7 @@ case "${1:-}" in
     if [ -n "$target" ] && tmux select-window -t "$target"; then
       # Also clear explicitly: an already-open tree may predate hook installation,
       # and selecting the current window need not trigger a window-change hook.
-      tmux set-option -wu -t "$target" @workspace_tree_unread
+      acknowledge_window "$target"
     fi
     ;;
 esac
