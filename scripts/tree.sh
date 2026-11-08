@@ -7,6 +7,8 @@
 #   0-9 / alt-a..z         jump straight to that row (labels shown dimmed at left)
 #   enter / ctrl-j (jump)  switch to task's window (ctrl-j = overlay number/letter labels)
 #   ctrl-r                 toggle revisit-later mark on the focused window
+#   ctrl-p                 pin/unpin the focused task (persists on entry)
+#   ctrl-n                 create a window for the focused task without one
 #   tab                    mark (multi-select)
 #   ctrl-x                 clean marked task(s): sends the client-appropriate
 #                          task-clean command to the workspace-root agent window
@@ -77,12 +79,13 @@ recent_enough() { [ -n "$(find "$1" -maxdepth 3 -type f -mtime "-$HIDE_DAYS" -pr
 # tmux clocks use epoch seconds; tmux-agent-status uses epoch milliseconds.
 # Sorting requires a common unit so the source does not outweigh actual recency.
 epoch_seconds() { local n="${1:-0}"; [ "$n" -gt 9999999999 ] 2>/dev/null && n=$(( n / 1000 )); printf '%s' "$n"; }
-# An icon may be cleared while its old status timestamp remains. Neither source
-# should mask newer activity; this also handles agent timestamps in milliseconds.
-latest_activity() {
-  local output status
-  output="$(epoch_seconds "${1:-0}")"; status="$(epoch_seconds "${2:-0}")"
-  if [ "$status" -gt "$output" ]; then printf '%s' "$status"; else printf '%s' "$output"; fi
+# Normalize visits and agent boundaries to milliseconds without losing visit order.
+# Terminal output is deliberately excluded: redraws are not user visits.
+latest_recency() {
+  local visit="${1:-0}" status="${2:-0}"
+  [ "$visit" -gt 9999999999 ] || visit=$(( visit * 1000 ))
+  [ "$status" -gt 9999999999 ] || status=$(( status * 1000 ))
+  if [ "$status" -gt "$visit" ]; then printf '%s' "$status"; else printf '%s' "$visit"; fi
 }
 dirty_count() { # total dirty files across a task's worktrees
   local d="$1" w n=0
@@ -110,28 +113,33 @@ namecol() {
 
 # emit: <prio>\t<subprio>\t<sortts>\t<dirty-or-0>\t<name>\t<targetid>\t<display>
 # prio groups rows: 0 = workspace-root window (cwd == $ROOT, e.g. the ~/work Claude
-# session), 1 = other non-task windows (on top), 2 = separator line, 3 = tasks.
+# session), 1 = other non-task windows, 2 = separator, 3 = pinned tasks,
+# 4 = other live tasks, 5 = stale tasks.
 # subprio sub-orders tasks (finished, revisit later, waiting, running, none). sortts is the key
 # list_tasks sorts finished/waiting tasks by status timestamp, marked/running
-# tasks and non-task windows by index, and iconless tasks by latest activity.
+# tasks and non-task windows by index, and iconless tasks by visits/agent events.
 # targetid is the tmux @window-id enter/jump switches to — unique
 # even when two windows share a name (name alone is ambiguous).
 # (cwd, not window index: renumber-windows shifts indices, so index 0 is unreliable.)
 rows() {
-  local mode="$1" showall ntask=0 nwin=0
+  local mode="$1" showall ntask=0 nwin=0 visited pinned
   showall="$(cat "$SHOWALL" 2>/dev/null || echo 0)"
-  declare -A ACT STAT CWD IDX TS WID UNREAD
+  declare -A ACT STAT CWD IDX TS WID UNREAD VISIT PIN
   local -a WINLINES=()
+  # Window numbers belong to a session. Keep other sessions out of both the
+  # visible rows and the name-keyed task lookup.
   # @agent_status / @agent_status_ts are often empty; a bare tab-IFS read would
   # collapse those empties and shift fields, so emit '-'/'0' sentinels for them.
   # We stash each raw line (sentinels intact) in WINLINES and iterate THAT for the
   # window rows below — the name-keyed arrays collapse duplicate names (two windows
   # named "server" would share one entry), but each raw line is distinct.
-  while IFS=$'\t' read -r idx name act cwd stat ts wid unread; do
+  while IFS=$'\t' read -r idx name act cwd stat ts wid unread visited pinned; do
     WINLINES+=("$idx"$'\t'"$name"$'\t'"$act"$'\t'"$cwd"$'\t'"$stat"$'\t'"$ts"$'\t'"$wid"$'\t'"$unread")
     [ "$stat" = "-" ] && stat=""
     IDX["$name"]="$idx"; ACT["$name"]="$act"; STAT["$name"]="$stat"; CWD["$name"]="$cwd"; TS["$name"]="$ts"; WID["$name"]="$wid"; UNREAD["$name"]="$unread"
-  done < <(tmux list-windows -a -F '#{window_index}	#{window_name}	#{window_activity}	#{pane_current_path}	#{?@agent_status,#{@agent_status},-}	#{?@agent_status_ts,#{@agent_status_ts},0}	#{window_id}	#{?@workspace_tree_unread,#{@workspace_tree_unread},0}' 2>/dev/null)
+    VISIT["$name"]="$visited"
+    PIN["$name"]="${pinned:-0}"
+  done < <(tmux list-windows -F '#{window_index}	#{window_name}	#{window_activity}	#{pane_current_path}	#{?@agent_status,#{@agent_status},-}	#{?@agent_status_ts,#{@agent_status_ts},0}	#{window_id}	#{?@workspace_tree_unread,#{@workspace_tree_unread},0}	#{?@workspace_tree_visited,#{@workspace_tree_visited},0}	#{?@workspace_tree_pinned,#{@workspace_tree_pinned},0}' 2>/dev/null)
   local d t act live repos dc path idx prio sp sts bare wid cwd stat ts name
   # ── Task rows: dirs under $TASKS (with per-worktree info) ──
   for d in "$TASKS"/*/; do
@@ -148,7 +156,7 @@ rows() {
     [ "${UNREAD[$t]:-0}" = 1 ] && live="$(unread_icon)"
     sp="$(subprio_of "$bare" "${UNREAD[$t]:-0}")"
     sts="$(epoch_seconds "${TS[$t]:-0}")"
-    [ "$sts" = 0 ] && sts="$act" # fall back to pane activity if no agent timestamp
+    [ "$sts" = 0 ] && sts=$(( 0 - ${idx:-0} ))
     # Running tasks order by window index, NOT by the status timestamp: that
     # timestamp is the current turn's trigger time, and an agent restamps it on
     # every new turn (codex on each task_started), so a timestamp sort reshuffles
@@ -160,14 +168,19 @@ rows() {
     # Marked tasks also stay in index order while their agent status changes.
     case "$sp" in
       1|3) sts=$(( 0 - ${idx:-0} )) ;;
-      4) sts="$(latest_activity "$act" "${TS[$t]:-0}")" ;;
+      4) sts="$(latest_recency "${VISIT[$t]:-0}" "${TS[$t]:-0}")"
+         [ "$sts" = 0 ] && sts=$(( 0 - ${idx:-0} )) ;;
     esac
     mapfile -t repos < <(worktrees "$d")
     dc=0; [ "$mode" = dirty ] && dc="$(dirty_count "$d")"
-    # tasks live under $ROOT/tasks, never at $ROOT itself -> always prio 3.
+    # Keep tasks without a live window below live tasks in every sort mode.
+    prio=4; [ -n "${WID[$t]:-}" ] || prio=5
+    if [ "${PIN[$t]:-0}" = 1 ]; then
+      prio=3; sp=0; sts=$(( 0 - ${idx:-0} )); live='📌'
+    fi
     # targetid = the task's live window id (empty if stale -> enter is a no-op).
-    printf '3\t%s\t%s\t%s\t%s\t%s\t%s %s %s \033[38;5;245m%s\033[0m\n' \
-      "$sp" "$sts" "$dc" "$t" "${WID[$t]:-}" "$(idxcol "$idx")" "$live" "$(namecol "$t")" "${repos[*]:-—}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s %s %s \033[38;5;245m%s\033[0m\n' \
+      "$prio" "$sp" "$sts" "$dc" "$t" "${WID[$t]:-}" "$(idxcol "$idx")" "$live" "$(namecol "$t")" "${repos[*]:-—}"
     ntask=$((ntask + 1))
   done
   # ── Plain window rows: any tmux window that isn't a task dir (pinned on top) ──
@@ -204,7 +217,7 @@ rows() {
 #
 # Two label pools so the ranges read cleanly by group:
 #   windows (prio 0/1) -> 0-9, then a-z if there are more than ten
-#   tasks   (prio 3)   -> always start at 'a'; if windows already spilled into
+#   tasks   (prio 3-5) -> always start at 'a'; if windows already spilled into
 #                         letters, continue after the last window letter
 #   separator (prio 2) -> no label, and does NOT consume a slot
 # Because labels no longer align with row positions, each labeled row's fzf
@@ -238,7 +251,7 @@ list_tasks() {
   # prio first keeps groups (root / non-task / separator / tasks) pinned. Default (activity)
   # mode also honors subprio (finished, revisit later, waiting, running); finished
   # and waiting sort by status timestamp desc, while marked and running tasks keep a
-  # fixed position by window index. Iconless tasks use latest activity. name/dirty
+  # fixed position by window index. Iconless tasks use visits/agent events. name/dirty
   # modes ignore subprio for a straight
   # alphabetical / dirtiest-first view.
   local mode; mode="$(cat "$STATE" 2>/dev/null || echo activity)"
@@ -276,8 +289,32 @@ toggle_unread() {
   fi
 }
 
+toggle_pin() {
+  local task="${1:-}" id="${2:-}" current
+  # Only live task rows can be pinned; separators and plain windows are no-ops.
+  [ -n "$task" ] && [ -n "$id" ] && [ -d "$TASKS/$task" ] || return 0
+  current="$(tmux show-option -wqv -t "$id" @workspace_tree_pinned 2>/dev/null)" || return 0
+  if [ "$current" = 1 ]; then
+    tmux set-option -wu -t "$id" @workspace_tree_pinned
+  else
+    tmux set-option -w -t "$id" @workspace_tree_pinned 1
+  fi
+}
+
+create_task_window() {
+  local task="${1:-}" id="${2:-}" session existing name
+  [ -n "$task" ] && [ -z "$id" ] && [ -d "$TASKS/$task" ] || return 0
+  # The row may be from an earlier refresh. Check again before creating a window.
+  session="$(tmux display-message -p '#{session_id}' 2>/dev/null)" || return 0
+  [ -n "$session" ] || return 0
+  existing="$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null)" || return 0
+  while IFS= read -r name; do [ "$name" != "$task" ] || return 0; done <<< "$existing"
+  tmux new-window -d -t "$session:" -n "$task" -c "$TASKS/$task"
+}
+
 acknowledge_window() {
   local id="$1" activity ts seen
+  bash "${SELF%/*}/../workspace-tree.tmux" mark-visited "$id"
   tmux set-option -wu -t "$id" @workspace_tree_unread
   # select-window runs while the popup still covers the pane, so the status
   # plugin's normal entry hook deliberately skips its acknowledgement. Record
@@ -308,6 +345,8 @@ show_help() {
   sec ACT
   row 'enter'          'switch to that window'
   row 'ctrl-r'         'toggle 🟡 revisit later (clears on entry)'
+  row 'ctrl-p'         'toggle 📌 pin task (keeps pin on entry)'
+  row 'ctrl-n'         'create window for task without one'
   row 'tab'            'mark (multi-select)'
   row 'ctrl-x'         'clean marked task(s) — popup stays open'
   sec VIEW
@@ -328,6 +367,16 @@ fmtdate() {
   date -r "$epoch" "$2" 2>/dev/null || date -d "@$epoch" "$2" 2>/dev/null
 }
 
+preview_agent() {
+  # Session text fits the preview width. Keep the existing upper-left capture
+  # when Python/session data is unavailable or ownership is ambiguous.
+  if command -v python3 >/dev/null 2>&1 && \
+    python3 "${SELF%/*}/session_preview.py" "$1" 2>/dev/null; then
+    return 0
+  fi
+  tmux capture-pane -ep -t "$1" 2>/dev/null
+}
+
 preview() {
   [ -n "${1:-}" ] || return 0   # separator row (empty name): nothing to show
   local t="$1" id="${2:-}" d="$TASKS/$1" w repo br ab ahead behind dirty act status_act activity
@@ -337,7 +386,7 @@ preview() {
     activity="$(tmux display-message -p -t "$id" \
       '#{window_activity}	#{?@agent_status_ts,#{@agent_status_ts},0}' 2>/dev/null)"
   else
-    activity="$(tmux list-windows -a \
+    activity="$(tmux list-windows \
       -F '#{window_name}	#{window_activity}	#{?@agent_status_ts,#{@agent_status_ts},0}' 2>/dev/null \
       | awk -F'\t' -v t="$t" '$1==t{print $2 "\t" $3; exit}')"
   fi
@@ -348,7 +397,7 @@ preview() {
     [ -n "$act" ] && echo "last output $(fmtdate "$act" '+%m-%d %H:%M')"
     echo
     printf '%*s\n' "${FZF_PREVIEW_COLUMNS:-80}" '' | tr ' ' '─'
-    tmux capture-pane -ep -t "${id:-$t}" 2>/dev/null
+    preview_agent "${id:-$t}"
     return
   fi
   echo "task: $t   [sort: $(cat "$STATE" 2>/dev/null || echo activity)]"
@@ -358,7 +407,7 @@ preview() {
       echo "agent activity $(fmtdate "$status_act" '+%m-%d %H:%M:%S')"
       echo "last output    $(fmtdate "$act" '+%m-%d %H:%M')"
     else
-      echo "agent activity unavailable (sorting falls back to last output)"
+      echo "agent activity unavailable (sorting uses window visits)"
       echo "last output    $(fmtdate "$act" '+%m-%d %H:%M')"
     fi
   else
@@ -379,8 +428,7 @@ preview() {
     echo
     # full-width divider (fzf exports FZF_PREVIEW_COLUMNS to the preview process)
     printf '%*s\n' "${FZF_PREVIEW_COLUMNS:-80}" '' | tr ' ' '─'
-    # -e keeps colors; nowrap preview truncates long lines like choose-tree does.
-    tmux capture-pane -ep -t "${id:-$t}" 2>/dev/null
+    preview_agent "${id:-$t}"
   fi
 }
 
@@ -389,7 +437,7 @@ preview() {
 # configured index if no window sits exactly at $ROOT.
 root_window() {
   local id
-  id="$(tmux list-windows -a -F '#{pane_current_path}	#{window_id}' 2>/dev/null \
+  id="$(tmux list-windows -F '#{pane_current_path}	#{window_id}' 2>/dev/null \
         | awk -F'\t' -v r="$ROOT" '$1==r{print $2; exit}')"
   printf '%s' "${id:-$WORK_WIN}"
 }
@@ -505,6 +553,8 @@ case "${1:-}" in
   --nextsort) next_sort ;;
   --toggleall) toggle_all ;;
   --toggle-unread) toggle_unread "${2:-}" ;;
+  --toggle-pin) toggle_pin "${2:-}" "${3:-}" ;;
+  --create-window) create_task_window "${2:-}" "${3:-}" ;;
   --help)     show_help ;;
   --clean)    shift; clean_tasks "$@" ;;
   --cleaned)  shift; cleaned_msg "$@" ;;
@@ -545,6 +595,8 @@ case "${1:-}" in
       --bind 'ctrl-j:jump-accept' \
       --bind 'tab:toggle+down' \
       --bind "ctrl-r:execute-silent(bash '$SELF' --toggle-unread {2})" \
+      --bind "ctrl-p:execute-silent(bash '$SELF' --toggle-pin {1} {2})" \
+      --bind "ctrl-n:execute-silent(bash '$SELF' --create-window {1} {2})" \
       --bind 'ctrl-u:up+up+up+up+up' --bind 'ctrl-d:down+down+down+down+down' \
       --bind 'ctrl-b:preview-half-page-up' --bind 'ctrl-f:preview-half-page-down' \
       --bind "?:execute(bash '$SELF' --help)" \

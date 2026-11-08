@@ -2,8 +2,8 @@
 
 fzf popup tree of your multi-repo-workspace tasks. Each task is a dir under
 `<root>/tasks/` and (usually) a tmux window of the same name. Every other tmux
-window is also listed, shown with its current directory — so this doubles as a
-plain window switcher.
+window in the current tmux session is also listed, shown with its current
+directory — so this doubles as a plain window switcher.
 
 - **j/k** — move down/up; **g/G** — top/bottom (nav-first: the search bar is hidden)
 - **0-9 / M-a…z** — jump straight to that row (labels are shown dimmed at the left, like choose-tree). Digits label the non-task windows, letters label the tasks (letters spill over if there are more than ten windows); the separator gets no label
@@ -18,6 +18,14 @@ plain window switcher.
   tasks without a live window cannot be marked. Marks appear on the next refresh
   (within 2 seconds).
 - **tab** — mark (multi-select)
+- **ctrl-p** — toggle a **📌** pin on the focused task. Pinned tasks appear above
+  all other tasks in every sort mode. Entering the window keeps its pin; press
+  ctrl-p again to remove it. Pins require a live task window and last until that
+  window is closed. The pin replaces the status icon (including the yellow dot)
+  while pinned; the revisit mark remains independent and still clears on entry.
+- **ctrl-n** — create a tmux window for the focused task if it has no window.
+  Opens a shell in the task directory in the current session and keeps the tree
+  open; the new window appears on the next refresh. Existing windows are left as-is.
 - **ctrl-x** — clean marked task(s): detects Codex or Claude in the workspace-root
   window, then sends `$task-clean <name>` or `/task-clean <name>` respectively (one per
   marked task); the popup stays open and focus stays put, and the preview shows a brief
@@ -28,21 +36,28 @@ plain window switcher.
 - **?** — help (full keymap; shown at the bottom of the popup)
 - **ctrl-u/ctrl-d** — scroll list; **ctrl-b/ctrl-f** — scroll preview
 - **preview** — per-worktree branch, ahead/behind, dirty count (or window cwd/info for
-  non-task windows), plus a colored pane capture (`nowrap` so long lines truncate)
+  non-task windows), plus the agent session's status, pending question, latest
+  assistant response, and recent tool names, wrapped to the preview width.
+  Supports Codex rollouts and Claude transcripts with a verified process/session
+  match. Ambiguous or unavailable sessions use the existing colored, upper-left
+  pane capture (`nowrap` so long lines truncate). Session previews require
+  **Python 3** and **lsof**; without them, screen capture still works.
 - **order** — the workspace-root window (cwd == `@workspace_tree_root`, i.e. the `~/work`
   agent session) is pinned first, then all other non-task windows (in ascending
   window-number order), then tasks. Tasks are
-  sub-grouped **finished → 🟡 revisit later → waiting → running**. Marked tasks
+  sub-grouped **📌 pinned → finished → 🟡 revisit later → waiting → running**.
+  In activity mode, pinned tasks stay in window-number order. Marked tasks
   are ordered by window index, even if their underlying agent status changes.
   Finished and waiting rows are ordered by
   the status timestamp (`@agent_status_ts` — finish time, or when the prompt appeared),
   newest first. **Running rows are ordered by tmux window index**, so they hold a fixed
   position: their timestamp is the current turn's trigger time and is restamped on every
   new turn, which otherwise reshuffles the group (and its jump labels) under the cursor.
-  Tasks without an icon come last, sorted by the newer of tmux window activity
-  and `@agent_status_ts`, newest first. Terminal output from Codex or any other
-  program counts, including redraws;
-  without agent-status hooks this measures terminal activity rather than turn completion.
+  Tasks without an icon come last, sorted by the newer of the last window visit
+  (`@workspace_tree_visited`) and `@agent_status_ts`, newest first. Background
+  terminal output and redraws do not affect ordering. Tasks with neither timestamp
+  stay in window-number order. Without agent status, recency follows window visits.
+  Tasks without a live window appear after all live tasks in every sort mode.
   (`name`/`dirty` modes ignore this sub-grouping.) A dim `───` separator row divides
   the window group from the task group (shown only when both exist; it's a no-op if
   selected).

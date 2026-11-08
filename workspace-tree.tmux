@@ -2,6 +2,14 @@
 # Bind one or more keys to open the workspace task tree in a popup.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${1:-}" = mark-visited ]; then
+  # Bash 5 provides subsecond time; Bash 4 falls back to whole seconds.
+  now="${EPOCHREALTIME:-}"
+  if [ -n "$now" ]; then now="${now/./}"; now="${now:0:13}"
+  else now="$(date +%s)000"; fi
+  tmux set-option -w -t "${2:-}" @workspace_tree_visited "$now"
+  exit 0
+fi
 # @workspace_tree_key may list several keys (space-separated), e.g. 'C-w w'.
 KEYS="$(tmux show-option -gqv @workspace_tree_key)"; KEYS="${KEYS:-w}"
 
@@ -18,10 +26,11 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "uninstall" ]; then
   exit 0
 fi
 
-# Window-local marks follow renames and index changes; clear on window entry.
+# Record visits separately from terminal output, which includes background redraws.
+# Window-local options follow renames and index changes.
 for hook in "${UNREAD_HOOKS[@]}"; do
   tmux set-hook -g "$hook[$UNREAD_HOOK_INDEX]" \
-    'set-option -wu @workspace_tree_unread'
+    "set-option -wu @workspace_tree_unread ; run-shell -b \"bash '$DIR/workspace-tree.tmux' mark-visited '#{window_id}'\""
 done
 
 # tmux has no public popup-active format or lifecycle hook. Maintain a global
