@@ -81,6 +81,71 @@ class SessionPreviewTest(unittest.TestCase):
     def test_transcript_control_sequences_are_not_executed(self):
         self.assertNotIn("\x1b", preview.clean("text\x1b[2J\x00"))
 
+    def codex_user(self, text):
+        return {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}
+
+    def claude_user(self, content, **fields):
+        return {"type": "user", "message": {"role": "user", "content": content}, **fields}
+
+    def test_codex_last_input_skips_injected_context(self):
+        self.write(self.codex_user("typed request"),
+                   self.codex_user("<environment_context>\n<cwd>/x</cwd>\n</environment_context>"),
+                   self.codex_user("<skill>\nbody\n</skill>"),
+                   self.codex_user("# AGENTS.md instructions for /x"),
+                   self.codex_user("The following is the Codex agent history"))
+        self.assertEqual(preview.transcript(self.path, "codex")["input"], "typed request")
+
+    def test_codex_input_starting_with_a_tag_is_kept(self):
+        self.write(self.codex_user("<div> is broken in this page"))
+        self.assertEqual(preview.transcript(self.path, "codex")["input"], "<div> is broken in this page")
+
+    def test_codex_user_message_event_is_input(self):
+        self.write({"type": "event_msg", "payload": {"type": "user_message", "message": "from event"}})
+        self.assertEqual(preview.transcript(self.path, "codex")["input"], "from event")
+
+    def test_claude_last_input_skips_non_human_entries(self):
+        self.write(self.claude_user("typed request", origin={"kind": "human"}),
+                   self.claude_user([{"type": "tool_result", "content": "output"}]),
+                   self.claude_user("injected", isMeta=True),
+                   self.claude_user("summary", isCompactSummary=True),
+                   self.claude_user("<task-notification>done</task-notification>", origin={"kind": "task-notification"}),
+                   self.claude_user("<local-command-stdout>out</local-command-stdout>"),
+                   self.claude_user([{"type": "text", "text": "[Request interrupted by user]"}]))
+        self.assertEqual(preview.transcript(self.path, "claude")["input"], "typed request")
+
+    def test_claude_slash_command_is_shown_as_typed(self):
+        self.write(self.claude_user("<command-message>foo</command-message>\n<command-name>/foo</command-name>\n"
+                                    "<command-args>some args</command-args>", origin={"kind": "human"}))
+        self.assertEqual(preview.transcript(self.path, "claude")["input"], "/foo some args")
+
+    def test_claude_queued_prompt_is_input_but_notification_is_not(self):
+        self.write({"type": "attachment", "attachment": {
+                        "type": "queued_command", "commandMode": "prompt",
+                        "origin": {"kind": "human"}, "prompt": "typed mid-turn"}},
+                   {"type": "attachment", "attachment": {
+                        "type": "queued_command", "commandMode": "task-notification",
+                        "origin": {"kind": "task-notification"}, "prompt": "background"}})
+        self.assertEqual(preview.transcript(self.path, "claude")["input"], "typed mid-turn")
+
+    def test_last_input_is_found_behind_the_normal_tail(self):
+        filler = {"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 100_000}]}}
+        self.write(self.claude_user("long-running request", origin={"kind": "human"}), *[filler] * 8)
+        self.assertEqual(preview.transcript(self.path, "claude")["input"], "long-running request")
+
+    def test_last_input_renders_before_response_with_each_line_wrapped(self):
+        data = {"state": "done", "text": "reply", "input": "first line\n" + "word " * 20, "questions": [], "tools": []}
+        rendered = preview.render([("claude", data)], 32).splitlines()
+        self.assertLess(rendered.index("Last input"), rendered.index("Latest assistant response"))
+        self.assertEqual(rendered[rendered.index("Last input") + 1], "first line")
+        self.assertTrue(all(len(line) <= 32 for line in rendered))
+
+    def test_long_input_is_truncated(self):
+        data = {"state": "", "text": "", "input": "y" * 5000, "questions": [], "tools": []}
+        rendered = preview.render([("claude", data)], 80)
+        self.assertEqual(rendered.count("y"), preview.INPUT_PREVIEW_CHARS)
+        self.assertIn("…", rendered)
+
     def test_shared_session_with_two_clients_in_same_directory_is_rejected(self):
         def output(*args):
             if args[0] == "ps":

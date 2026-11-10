@@ -12,6 +12,16 @@ import sys
 import textwrap
 
 
+TAIL_BYTES = 512 * 1024
+# A long agent turn can push the user's message far behind the normal tail.
+INPUT_SCAN_BYTES = 8 * 1024 * 1024
+INPUT_PREVIEW_CHARS = 800
+# Agent-injected context arrives with the user role, wrapped in one snake_case tag.
+CODEX_WRAPPED = re.compile(r"\s*<([a-z_]+)>.*</\1>\s*", re.DOTALL)
+CODEX_INJECTED = ("# AGENTS.md", "The following is the Codex agent")
+CLAUDE_NON_INPUT = ("<local-command-", "<task-notification>", "[Request interrupted")
+
+
 def command(*args):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=3)
@@ -20,12 +30,12 @@ def command(*args):
         return ""
 
 
-def records(path):
+def records(path, limit=TAIL_BYTES):
     # Bound work on large transcripts; ignore an incomplete trailing JSON record.
     try:
         with open(path, "rb") as stream:
             stream.seek(0, 2)
-            start = max(0, stream.tell() - 512 * 1024)
+            start = max(0, stream.tell() - limit)
             stream.seek(start)
             if start:
                 stream.readline()
@@ -55,11 +65,68 @@ def metadata(path):
     return {}
 
 
+def codex_input(item):
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if item.get("type") == "event_msg":
+        message = payload.get("message") if payload.get("type") == "user_message" else ""
+        return message if isinstance(message, str) else ""
+    if payload.get("type") != "message" or payload.get("role") != "user":
+        return ""
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    text = "\n".join(str(block.get("text", "")) for block in content
+                     if isinstance(block, dict) and block.get("type") == "input_text")
+    if CODEX_WRAPPED.fullmatch(text) or text.lstrip().startswith(CODEX_INJECTED):
+        return ""
+    return text
+
+
+def is_human(origin):
+    # Older Claude transcripts have no origin field.
+    return not isinstance(origin, dict) or origin.get("kind") == "human"
+
+
+def claude_input(item):
+    if item.get("type") == "attachment":
+        queued = item.get("attachment")
+        if (isinstance(queued, dict) and queued.get("type") == "queued_command"
+                and queued.get("commandMode") == "prompt" and is_human(queued.get("origin"))
+                and isinstance(queued.get("prompt"), str)):
+            return queued["prompt"]
+        return ""
+    if (item.get("type") != "user" or item.get("isMeta") or item.get("isSidechain")
+            or item.get("isCompactSummary") or not is_human(item.get("origin"))):
+        return ""
+    message = item.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+            return ""
+        content = "\n".join(str(block.get("text", "")) for block in content
+                            if isinstance(block, dict) and block.get("type") == "text")
+    if not isinstance(content, str):
+        return ""
+    stripped = content.lstrip()
+    if stripped.startswith("<command-"):
+        name = re.search(r"<command-name>(.*?)</command-name>", content, re.DOTALL)
+        args = re.search(r"<command-args>(.*?)</command-args>", content, re.DOTALL)
+        return " ".join(m.group(1).strip() for m in (name, args) if m).strip()
+    return "" if stripped.startswith(CLAUDE_NON_INPUT) else content
+
+
+def user_input(item, kind):
+    return (codex_input(item) if kind == "codex" else claude_input(item)).strip()
+
+
 def transcript(path, kind):
-    state, latest, pending = "", "", []
+    state, latest, pending, last_input = "", "", [], ""
     tools = collections.deque(maxlen=5)
     question_id = None
     for item in records(path):
+        last_input = user_input(item, kind) or last_input
         payload = item.get("payload") or {}
         if not isinstance(payload, dict):
             continue
@@ -114,7 +181,10 @@ def transcript(path, kind):
                 output = None
             if isinstance(output, dict) and output.get("answers"):
                 pending = []
-    return {"state": "waiting" if pending else state, "text": latest,
+    if not last_input:
+        for item in records(path, INPUT_SCAN_BYTES):
+            last_input = user_input(item, kind) or last_input
+    return {"state": "waiting" if pending else state, "text": latest, "input": last_input,
             "questions": pending, "tools": list(tools)}
 
 
@@ -251,6 +321,12 @@ def render(sessions, width):
     lines = []
     for kind, data in sessions:
         lines.append(f"{kind.title()} — {data.get('icon', '')} {data['state'] or 'session'}")
+        if data["input"]:
+            text = data["input"]
+            if len(text) > INPUT_PREVIEW_CHARS:
+                text = text[:INPUT_PREVIEW_CHARS].rstrip() + " …"
+            lines.extend(("", "Last input"))
+            lines.extend(text.splitlines())
         for question in data["questions"]:
             if not isinstance(question, dict):
                 continue
@@ -270,7 +346,7 @@ def render(sessions, width):
 def main():
     try:
         sessions = find_sessions(sys.argv[1])
-        if not sessions or not any(d["text"] or d["questions"] or d["tools"] for _, d in sessions):
+        if not sessions or not any(d["input"] or d["text"] or d["questions"] or d["tools"] for _, d in sessions):
             return 1
         width = max(10, int(os.environ.get("FZF_PREVIEW_COLUMNS", "80")))
         print(render(sessions, width))

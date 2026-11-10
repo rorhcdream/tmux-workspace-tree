@@ -36,8 +36,9 @@ directory — so this doubles as a plain window switcher.
 - **?** — help (full keymap; shown at the bottom of the popup)
 - **ctrl-u/ctrl-d** — scroll list; **ctrl-b/ctrl-f** — scroll preview
 - **preview** — per-worktree branch, ahead/behind, dirty count (or window cwd/info for
-  non-task windows), plus the agent session's status, pending question, latest
-  assistant response, and recent tool names, wrapped to the preview width.
+  non-task windows), plus the agent session's status, your last input, pending
+  question, latest assistant response, and recent tool names, wrapped to the
+  preview width.
   Supports Codex rollouts and Claude transcripts with a verified process/session
   match. Ambiguous or unavailable sessions use the existing colored, upper-left
   pane capture (`nowrap` so long lines truncate). Session previews require
